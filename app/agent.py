@@ -47,6 +47,28 @@ _BASE_PROTOCOL = (
 )
 
 
+@dataclass(frozen=True)
+class Skill:
+    """技能：提示词级能力包，声明依赖的工具（见 CONTEXT.md「技能」）。"""
+
+    name: str
+    guide: str
+    tools: tuple[str, ...] = ()
+
+
+def demo_time_report_skill() -> Skill:
+    """演示技能：打通「技能注入 → 多步工具调用 → finish」全链路。"""
+    return Skill(
+        name="时间报告",
+        guide=(
+            "当用户询问涉及当前日期时间的推算（如『3 天后是几号』）时："
+            "先调用 get_current_time 获取当前时间，再基于它推理目标日期，"
+            "需要数值计算时用 calculator，最后用 finish 交付完整结论。"
+        ),
+        tools=("get_current_time", "calculator"),
+    )
+
+
 class AgentState(Enum):
     THINKING = auto()
     ACTING = auto()
@@ -200,13 +222,22 @@ class AgentEngine:
         tools: ToolRegistry,
         max_iterations: int = 8,
         max_observation_chars: int = DEFAULT_MAX_OBSERVATION_CHARS,
+        skills: tuple[Skill, ...] = (),
     ):
         if not tools.names():
             raise ValueError("Agent 引擎至少需要一个工具，否则无法形成行动-观察回路")
         if max_iterations < 1:
             raise ValueError("max_iterations 至少为 1")
+        registered = set(tools.names())
+        for skill in skills:
+            missing = [name for name in skill.tools if name not in registered]
+            if missing:
+                raise ValueError(
+                    f"技能 {skill.name} 依赖未注册的工具: {'、'.join(missing)}"
+                )
         self.llm = llm
         self._tools = tools
+        self._skills = tuple(skills)
         self._max_iterations = max_iterations
         self._max_observation_chars = max_observation_chars
         # finish 是协议工具：随每次请求注入 schema，但不属于注册表
@@ -336,7 +367,18 @@ class AgentEngine:
         trimmed = trace
         if len(trace) > MAX_TRACE_MESSAGES:
             trimmed = [trace[0], *trace[-(MAX_TRACE_MESSAGES - 1) :]]
-        return [{"role": "system", "content": _BASE_PROTOCOL}, *trimmed]
+        return [{"role": "system", "content": self._system_prompt()}, *trimmed]
+
+    def _system_prompt(self) -> str:
+        """基础协议 + 已启用技能的受控文本块（技能走上下文通道）。"""
+        sections = [_BASE_PROTOCOL]
+        for skill in self._skills:
+            dependencies = "、".join(skill.tools) or "无"
+            sections.append(
+                f"## 可用技能：{skill.name}\n{skill.guide}\n"
+                f"（建议使用的工具：{dependencies}）"
+            )
+        return "\n\n".join(sections)
 
     @staticmethod
     def _goto(current: AgentState, nxt: AgentState) -> AgentState:

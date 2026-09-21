@@ -197,6 +197,44 @@ class ObservationLimitTest(unittest.TestCase):
         self.assertTrue(observed.result.endswith("…"))
 
 
+class SkillInjectionTest(unittest.TestCase):
+    def make_engine_with_skill(self) -> AgentEngine:
+        from app.agent import Skill
+
+        skill = Skill(
+            name="时间报告",
+            guide="先取时间，再换算日期",
+            tools=("get_current_time", "calculator"),
+        )
+        return make_engine([text_round("答案")], registry=default_registry(), skills=(skill,))
+
+    def test_skill_guide_injected_into_system_prompt(self):
+        engine = self.make_engine_with_skill()
+        list(engine.run("测试任务"))
+        messages, _ = engine.llm.calls[0]
+        system = messages[0]["content"]
+        self.assertIn("时间报告", system)
+        self.assertIn("先取时间，再换算日期", system)
+        self.assertIn("get_current_time", system)
+
+    def test_base_protocol_present_without_skills(self):
+        engine = make_engine([text_round("答案")], registry=default_registry())
+        list(engine.run("测试任务"))
+        system = engine.llm.calls[0][0][0]["content"]
+        self.assertIn("finish", system)
+        self.assertNotIn("可用技能", system)
+
+    def test_skill_with_unregistered_tool_rejected(self):
+        from app.agent import Skill
+
+        with self.assertRaises(ValueError):
+            make_engine(
+                [],
+                registry=default_registry(),
+                skills=(Skill(name="坏技能", guide="g", tools=("missing",)),),
+            )
+
+
 class EngineGuardTest(unittest.TestCase):
     def test_engine_without_tools_rejected(self):
         from app.tools import ToolRegistry

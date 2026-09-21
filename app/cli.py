@@ -29,6 +29,7 @@ from .agent import (
     TaskFailed,
     TaskFinished,
     ThoughtDelta,
+    demo_time_report_skill,
 )
 from .config import (
     PROVIDERS,
@@ -193,6 +194,7 @@ def main() -> int:
         llm,
         default_registry(),
         max_iterations=settings.agent_max_iterations,
+        skills=(demo_time_report_skill(),),
     )
 
     console.print("[bold]multiagent 终端对话[/bold]")

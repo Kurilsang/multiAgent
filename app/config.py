@@ -63,6 +63,9 @@ class Settings(BaseSettings):
 
     max_context_messages: int = Field(default=20, ge=2)
 
+    # Agent 任务最大思考轮数（引擎侧硬上限，超过则以 partial 终态收尾）
+    agent_max_iterations: int = Field(default=8, ge=1)
+
     api_host: str = "127.0.0.1"
     api_port: int = 8000
 

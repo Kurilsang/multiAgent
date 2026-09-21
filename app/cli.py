@@ -7,18 +7,29 @@
 会话内命令（大小写均可）:
     /model            查看可用厂商及当前目标
     /model <name>     切换厂商（如 /model deepseek）
+    /agent <任务>     发起自主多步任务（思考→行动→观察→判断）
     /reset            清空对话上下文
     /help             显示帮助
     /exit             退出
 """
 
 import argparse
+import json
 import sys
 
 from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 
+from .agent import (
+    OBSERVATION_PREVIEW_CHARS,
+    ActionObserved,
+    ActionStarted,
+    AgentEngine,
+    TaskFailed,
+    TaskFinished,
+    ThoughtDelta,
+)
 from .config import (
     PROVIDERS,
     ConfigError,
@@ -28,12 +39,14 @@ from .config import (
 )
 from .conversation import Conversation
 from .llm import LLMClient, LLMError
+from .tools import default_registry
 
 console = Console()
 
 HELP_TEXT = """[bold]命令[/bold]
   /model            查看可用厂商及当前目标
   /model <name>     切换厂商（deepseek / glm / minimax）
+  /agent <任务>     发起自主多步任务（ReAct 循环）
   /reset            清空对话上下文
   /exit             退出"""
 
@@ -80,6 +93,79 @@ def chat_once(
     console.print()
 
 
+def _observation_preview(text: str) -> str:
+    if len(text) <= OBSERVATION_PREVIEW_CHARS:
+        return text
+    return text[: OBSERVATION_PREVIEW_CHARS - 1] + "…"
+
+
+def run_agent_task(
+    agent: AgentEngine,
+    conversation: Conversation,
+    task: str,
+    provider: str,
+    model: str | None,
+) -> None:
+    """执行一次任务并实时渲染事件流；完成后把「请求 + 答案」回写主对话。
+
+    回写约定（见 CONTEXT.md「主对话」）：completed / partial 回写答案，
+    FAILED 与中断不回写，主对话保持一问一答的连贯性。
+    """
+    console.print(f"[bold magenta]任务[/bold magenta] > {escape(task)}")
+    in_thought = False
+    answer: str | None = None
+    try:
+        for event in agent.run(task, provider, model):
+            if isinstance(event, ThoughtDelta):
+                if not in_thought:
+                    console.print("[dim]思考[/dim] > ", end="")
+                    in_thought = True
+                # 模型输出按纯文本打印，避免 rich 把 '[' 当标记解析
+                console.print(event.text, end="", markup=False, highlight=False)
+            elif isinstance(event, ActionStarted):
+                if in_thought:
+                    console.print()
+                    in_thought = False
+                args_text = json.dumps(event.arguments, ensure_ascii=False)
+                console.print(
+                    f"[bold blue]行动[/bold blue] "
+                    f"{escape(event.tool_name)}({escape(args_text)})"
+                )
+            elif isinstance(event, ActionObserved):
+                if in_thought:
+                    console.print()
+                    in_thought = False
+                style = "red" if event.is_error else "blue"
+                console.print(
+                    f"[{style}]观察[/{style}] "
+                    f"{escape(_observation_preview(event.result))}"
+                )
+            elif isinstance(event, TaskFinished):
+                if in_thought:
+                    console.print()
+                    in_thought = False
+                label = "完成" if event.status == "completed" else "部分完成（预算耗尽）"
+                console.print(
+                    f"\n[bold green]assistant（{label}，{event.iterations} 轮）"
+                    f"[/bold green] > {escape(event.answer)}"
+                )
+                answer = event.answer
+            elif isinstance(event, TaskFailed):
+                if in_thought:
+                    console.print()
+                    in_thought = False
+                console.print(
+                    f"\n[red]任务失败（第 {event.iterations} 轮）："
+                    f"{escape(event.reason)}[/red]"
+                )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]已中断任务（轨迹未回写主对话）[/yellow]")
+        return
+    if answer is not None:
+        conversation.add("user", task)
+        conversation.add("assistant", answer)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="多厂商 LLM 终端对话")
     parser.add_argument("--provider", help="启动时指定厂商（deepseek/glm/minimax）")
@@ -103,6 +189,11 @@ def main() -> int:
         system_prompt=args.system, max_messages=settings.max_context_messages
     )
     llm = LLMClient(settings)
+    agent = AgentEngine(
+        llm,
+        default_registry(),
+        max_iterations=settings.agent_max_iterations,
+    )
 
     console.print("[bold]multiagent 终端对话[/bold]")
     console.print(f"当前目标: [cyan]{escape(describe_target(target))}[/cyan]")
@@ -129,6 +220,13 @@ def main() -> int:
         if command == "/reset":
             conversation.reset()
             console.print("[yellow]对话上下文已清空[/yellow]")
+            continue
+        if command == "/agent":
+            task = user_input[len("/agent") :].strip()
+            if not task:
+                console.print("[yellow]用法: /agent <任务描述>[/yellow]")
+                continue
+            run_agent_task(agent, conversation, task, current_provider, current_model)
             continue
         if command == "/model":
             if len(parts) == 1:

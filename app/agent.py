@@ -171,7 +171,8 @@ def _parse_call(call) -> _ParsedCall:
     )
 
 
-def _truncate(text: str, limit: int) -> str:
+def truncate_text(text: str, limit: int) -> str:
+    """超长文本截断为 limit 字符以内，末尾以省略号提示。"""
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
@@ -204,12 +205,12 @@ def _progress_summary(trace: list[dict], iterations: int) -> str:
         if role == "assistant":
             thought = (message.get("content") or "").strip()
             if thought:
-                lines.append(f"[思考] {_truncate(thought, 200)}")
+                lines.append(f"[思考] {truncate_text(thought, 200)}")
             names = [tc["function"]["name"] for tc in message.get("tool_calls", [])]
             if names:
                 lines.append(f"[动作] 调用 {'、'.join(names)}")
         elif role == "tool":
-            lines.append(f"[观察] {_truncate(message['content'], 200)}")
+            lines.append(f"[观察] {truncate_text(message['content'], 200)}")
     return "\n".join(lines)
 
 
@@ -317,7 +318,7 @@ class AgentEngine:
                 for call in parsed_calls:
                     yield ActionStarted(tool_name=call.name, arguments=call.arguments)
                     result, is_error = self._execute(call)
-                    result = _truncate(result, self._max_observation_chars)
+                    result = truncate_text(result, self._max_observation_chars)
                     yield ActionObserved(tool_name=call.name, result=result, is_error=is_error)
                     trace.append(_tool_message(call.id, result))
                     recent_actions.append((call.name, call.arguments_json))

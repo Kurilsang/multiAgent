@@ -30,6 +30,7 @@ from .agent import (
     TaskFinished,
     ThoughtDelta,
     demo_time_report_skill,
+    truncate_text,
 )
 from .config import (
     PROVIDERS,
@@ -94,12 +95,6 @@ def chat_once(
     console.print()
 
 
-def _observation_preview(text: str) -> str:
-    if len(text) <= OBSERVATION_PREVIEW_CHARS:
-        return text
-    return text[: OBSERVATION_PREVIEW_CHARS - 1] + "…"
-
-
 def run_agent_task(
     agent: AgentEngine,
     conversation: Conversation,
@@ -139,7 +134,7 @@ def run_agent_task(
                 style = "red" if event.is_error else "blue"
                 console.print(
                     f"[{style}]观察[/{style}] "
-                    f"{escape(_observation_preview(event.result))}"
+                    f"{escape(truncate_text(event.result, OBSERVATION_PREVIEW_CHARS))}"
                 )
             elif isinstance(event, TaskFinished):
                 if in_thought:

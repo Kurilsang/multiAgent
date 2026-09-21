@@ -18,7 +18,7 @@ from app.agent import (
     TaskStarted,
     ThoughtDelta,
 )
-from app.llm import LLMError, LLMClient
+from app.llm import LLMError
 
 
 class FakeStreamLLM:
@@ -175,6 +175,11 @@ class AgentStreamTest(unittest.TestCase):
                 },
             ],
         )
+        # 任务结束后「请求 + 最终答案」回写主对话（与 CLI 路径一致）
+        self.assertEqual(len(server.conversation), 2)
+        messages = server.conversation.messages_for_api()
+        self.assertEqual(messages[0]["content"], "现在几点")
+        self.assertEqual(messages[1]["content"], "今天是星期一")
 
     def test_agent_stream_emits_failed_frame(self):
         server.agent_engine = FakeAgentEngine(
@@ -187,6 +192,8 @@ class AgentStreamTest(unittest.TestCase):
         self.assertEqual(
             frames[-1], {"type": "failed", "reason": "死循环", "iterations": 3}
         )
+        # 失败的任务不回写主对话
+        self.assertEqual(len(server.conversation), 0)
 
     def test_blank_task_rejected(self):
         resp = self.client.post("/agent/stream", json={"task": "   "})

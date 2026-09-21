@@ -207,7 +207,9 @@ def _agent_event_frame(event) -> dict:
             "answer": event.answer,
             "iterations": event.iterations,
         }
-    return {"type": "failed", "reason": event.reason, "iterations": event.iterations}
+    if isinstance(event, TaskFailed):
+        return {"type": "failed", "reason": event.reason, "iterations": event.iterations}
+    raise RuntimeError(f"未知的引擎事件类型: {type(event).__name__}")
 
 
 @app.post("/agent/stream")
@@ -225,8 +227,15 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
     def generate():
         # 与聊天共用同一把锁：任务回写主对话时互斥
         with _chat_lock:
+            answer: str | None = None
             for event in agent_engine.run(req.task, req.provider, req.model):
                 yield _sse(_agent_event_frame(event))
+                if isinstance(event, TaskFinished):
+                    answer = event.answer
+            if answer is not None:
+                # 与 CLI 路径一致：completed / partial 回写「请求 + 最终答案」
+                conversation.add("user", req.task)
+                conversation.add("assistant", answer)
 
     return StreamingResponse(
         generate(),

@@ -10,6 +10,8 @@
     GET  /health          健康检查
     GET  /providers       列出厂商及配置状态
     POST /chat            发送一条消息 {"message": "...", "provider": "glm"(可选), "model": "..."(可选)}
+    POST /chat/stream     同 /chat，逐 token SSE 流式推送
+    POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
     POST /reset           清空对话上下文
 """
 
@@ -21,14 +23,31 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from .agent import (
+    ActionObserved,
+    ActionStarted,
+    AgentEngine,
+    TaskFailed,
+    TaskFinished,
+    TaskStarted,
+    ThoughtDelta,
+    demo_time_report_skill,
+)
 from .config import PROVIDERS, ConfigError, Settings, resolve_target
 from .conversation import Conversation
 from .llm import LLMClient, LLMError
+from .tools import default_registry
 
 settings = Settings()
 llm = LLMClient(settings)
 conversation = Conversation(
     system_prompt=None, max_messages=settings.max_context_messages
+)
+agent_engine = AgentEngine(
+    llm,
+    default_registry(),
+    max_iterations=settings.agent_max_iterations,
+    skills=(demo_time_report_skill(),),
 )
 
 # 单会话范围：串行化对话轮次，避免并发 /chat 互相污染同一份历史
@@ -145,6 +164,69 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             except LLMError as exc:
                 conversation.pop_last()
                 yield _sse({"type": "error", "detail": str(exc)})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+class AgentRequest(BaseModel):
+    task: str = Field(min_length=1)
+    provider: str | None = None
+    model: str | None = None
+
+    @field_validator("task")
+    @classmethod
+    def _reject_blank_task(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("task 不能为空白")
+        return value
+
+
+def _agent_event_frame(event) -> dict:
+    """把引擎事件编码为 SSE 载荷。"""
+    if isinstance(event, TaskStarted):
+        return {"type": "task_started"}
+    if isinstance(event, ThoughtDelta):
+        return {"type": "thought_delta", "text": event.text}
+    if isinstance(event, ActionStarted):
+        return {"type": "action", "tool": event.tool_name, "arguments": event.arguments}
+    if isinstance(event, ActionObserved):
+        return {
+            "type": "observation",
+            "tool": event.tool_name,
+            "text": event.result,
+            "is_error": event.is_error,
+        }
+    if isinstance(event, TaskFinished):
+        return {
+            "type": "final",
+            "status": event.status,
+            "answer": event.answer,
+            "iterations": event.iterations,
+        }
+    return {"type": "failed", "reason": event.reason, "iterations": event.iterations}
+
+
+@app.post("/agent/stream")
+def agent_stream(req: AgentRequest) -> StreamingResponse:
+    """Agent 任务 SSE：思考逐字实时转发，动作/观察按步推送，终态带原因。
+
+    非 200 的配置错误在开流之前抛出；引擎自身会把上游错误编码为
+    failed 帧，因此流内不会抛出异常。
+    """
+    try:
+        resolve_target(settings, req.provider, req.model)
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def generate():
+        # 与聊天共用同一把锁：任务回写主对话时互斥
+        with _chat_lock:
+            for event in agent_engine.run(req.task, req.provider, req.model):
+                yield _sse(_agent_event_frame(event))
 
     return StreamingResponse(
         generate(),

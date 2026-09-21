@@ -10,6 +10,14 @@ import unittest
 from fastapi.testclient import TestClient
 
 import app.server as server
+from app.agent import (
+    ActionObserved,
+    ActionStarted,
+    TaskFailed,
+    TaskFinished,
+    TaskStarted,
+    ThoughtDelta,
+)
 from app.llm import LLMError, LLMClient
 
 
@@ -44,6 +52,18 @@ class StubSettings:
 
     def api_key_for(self, provider: str) -> str:
         return "test-key"
+
+
+class FakeAgentEngine:
+    """模拟引擎：按脚本产出事件流。"""
+
+    def __init__(self, events):
+        self.events = events
+        self.calls = []
+
+    def run(self, task, provider=None, model=None):
+        self.calls.append((task, provider, model))
+        yield from self.events
 
 
 class ChatStreamTest(unittest.TestCase):
@@ -96,6 +116,80 @@ class ChatStreamTest(unittest.TestCase):
 
     def test_blank_message_rejected(self):
         resp = self.client.post("/chat/stream", json={"message": "   "})
+        self.assertEqual(resp.status_code, 422)
+
+
+class AgentStreamTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_engine = server.agent_engine
+        self._orig_settings = server.settings
+        server.settings = StubSettings()
+        server.conversation.reset()
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.conversation.reset()
+        server.agent_engine = self._orig_engine
+        server.settings = self._orig_settings
+
+    def _parse_frames(self, response) -> list[dict]:
+        frames = []
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                frames.append(json.loads(line[len("data: ") :]))
+        return frames
+
+    def test_agent_stream_emits_step_frames(self):
+        server.agent_engine = FakeAgentEngine(
+            [
+                TaskStarted(task="现在几点"),
+                ThoughtDelta("我需要"),
+                ThoughtDelta("查时间"),
+                ActionStarted(tool_name="get_current_time", arguments={}),
+                ActionObserved(tool_name="get_current_time", result="2026-09-21 星期一", is_error=False),
+                TaskFinished(status="completed", answer="今天是星期一", iterations=2),
+            ]
+        )
+        with self.client.stream(
+            "POST", "/agent/stream", json={"task": "现在几点"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(
+            frames,
+            [
+                {"type": "task_started"},
+                {"type": "thought_delta", "text": "我需要"},
+                {"type": "thought_delta", "text": "查时间"},
+                {"type": "action", "tool": "get_current_time", "arguments": {}},
+                {
+                    "type": "observation",
+                    "tool": "get_current_time",
+                    "text": "2026-09-21 星期一",
+                    "is_error": False,
+                },
+                {
+                    "type": "final",
+                    "status": "completed",
+                    "answer": "今天是星期一",
+                    "iterations": 2,
+                },
+            ],
+        )
+
+    def test_agent_stream_emits_failed_frame(self):
+        server.agent_engine = FakeAgentEngine(
+            [TaskStarted(task="x"), TaskFailed(reason="死循环", iterations=3)]
+        )
+        with self.client.stream(
+            "POST", "/agent/stream", json={"task": "x"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(
+            frames[-1], {"type": "failed", "reason": "死循环", "iterations": 3}
+        )
+
+    def test_blank_task_rejected(self):
+        resp = self.client.post("/agent/stream", json={"task": "   "})
         self.assertEqual(resp.status_code, 422)
 
 

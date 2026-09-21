@@ -76,6 +76,34 @@
   }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   #send-btn:hover:not(:disabled) { background: var(--accent); }
+  #task-btn {
+    background: transparent; border: 1px solid var(--accent-2); color: var(--accent);
+    padding: 0 16px; border-radius: 10px; font-size: 13px;
+  }
+  #task-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #task-btn:hover:not(:disabled) { background: var(--panel-2); border-color: var(--accent); }
+
+  /* ===== Agent 任务时间线 ===== */
+  .task-card {
+    align-self: flex-start; max-width: 86%;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 16px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .task-title { font-size: 12px; color: var(--muted); }
+  .task-card .step { font-size: 13px; line-height: 1.6; }
+  .step.thought { color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  .step.action { color: var(--accent); font-family: Consolas, "Courier New", monospace; font-size: 12.5px; }
+  .step.observation {
+    color: var(--text); background: var(--panel-2); border-radius: 8px;
+    padding: 8px 10px; font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .step.observation.error { color: var(--error); }
+  .step.final, .step.failed {
+    white-space: pre-wrap; word-break: break-word; font-weight: 600;
+    border-top: 1px solid var(--border); padding-top: 8px;
+  }
+  .step.failed { color: var(--error); }
 </style>
 </head>
 <body>
@@ -95,6 +123,7 @@
 
   <footer>
     <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行" autofocus></textarea>
+    <button id="task-btn" title="作为自主多步任务执行（思考→行动→观察）">任务</button>
     <button id="send-btn">发送</button>
   </footer>
 
@@ -102,6 +131,7 @@
 const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
+const taskBtn = document.getElementById('task-btn');
 const clearBtn = document.getElementById('clear-btn');
 const providerEl = document.getElementById('provider-select');
 const defaultHintEl = document.getElementById('default-hint');
@@ -227,6 +257,82 @@ async function send() {
   }
 }
 
+async function runAgent() {
+  const text = inputEl.value.trim();
+  if (!text || busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  taskBtn.disabled = true;
+  inputEl.value = '';
+  inputEl.style.height = '46px';
+
+  const body = { task: text };
+  if (providerEl.value) body.provider = providerEl.value;
+
+  const card = document.createElement('div');
+  card.className = 'task-card';
+  const title = document.createElement('div');
+  title.className = 'task-title';
+  title.textContent = '任务 > ' + text;
+  card.appendChild(title);
+  chatEl.appendChild(card);
+  scrollToBottom();
+
+  // 思考流式追加的目标；动作开始后置空，下一轮思考另起一段
+  let thoughtEl = null;
+  const closeThought = () => { thoughtEl = null; };
+  const addStep = (className, textContent) => {
+    const step = document.createElement('div');
+    step.className = 'step ' + className;
+    if (textContent !== undefined) step.textContent = textContent;
+    card.appendChild(step);
+    scrollToBottom();
+    return step;
+  };
+
+  try {
+    const res = await fetch('/agent/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => null);
+      const detail = typeof (err && err.detail) === 'string'
+        ? err.detail : 'HTTP ' + res.status;
+      addStep('failed', '出错了：' + detail);
+      return;
+    }
+    for await (const evt of readSse(res.body)) {
+      if (evt.type === 'task_started') continue;
+      if (evt.type === 'thought_delta') {
+        if (!thoughtEl) thoughtEl = addStep('thought', '');
+        thoughtEl.textContent += evt.text;
+        scrollToBottom();
+      } else if (evt.type === 'action') {
+        closeThought();
+        addStep('action', '→ ' + evt.tool + '(' + JSON.stringify(evt.arguments) + ')');
+      } else if (evt.type === 'observation') {
+        addStep('observation' + (evt.is_error ? ' error' : ''), evt.text);
+      } else if (evt.type === 'final') {
+        closeThought();
+        addStep('final', evt.answer + (evt.status === 'partial' ? '\n（部分完成——预算耗尽，以上为已有进展）' : ''));
+        addMeta(card, evt.iterations + ' 轮');
+      } else if (evt.type === 'failed') {
+        closeThought();
+        addStep('failed', '任务失败：' + evt.reason + '（第 ' + evt.iterations + ' 轮）');
+      }
+    }
+  } catch (e) {
+    addStep('failed', '网络错误：' + e.message);
+  } finally {
+    busy = false;
+    sendBtn.disabled = false;
+    taskBtn.disabled = false;
+    inputEl.focus();
+  }
+}
+
 async function clearChat() {
   try { await fetch('/reset', { method: 'POST' }); } catch (e) { /* 忽略 */ }
   chatEl.innerHTML = '';
@@ -234,6 +340,7 @@ async function clearChat() {
 }
 
 sendBtn.addEventListener('click', send);
+taskBtn.addEventListener('click', runAgent);
 clearBtn.addEventListener('click', clearChat);
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {

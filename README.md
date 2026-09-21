@@ -34,6 +34,8 @@ python -m app.cli
 python -m app.cli --provider deepseek
 ```
 
+Windows 下也可以直接双击 **`run.bat`**：首次运行自动创建虚拟环境、安装依赖并生成 `.env`；随后菜单可选 WebUI（自动开浏览器）、终端对话、运行测试、更新依赖、编辑 `.env`。
+
 ## CLI 命令
 
 | 命令 | 说明 |

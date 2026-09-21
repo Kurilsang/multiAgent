@@ -68,6 +68,16 @@ goto menu
 
 :webui
 echo.
+netstat -ano | findstr ":8000" | findstr "LISTENING" >nul
+if not errorlevel 1 (
+    echo [提示] 端口 8000 已被占用，可能有一个旧的服务窗口还开着。
+    echo        本次直接为你打开页面；若要重启服务，请先关闭占用端口的旧窗口。
+    echo        查看占用进程：netstat -ano ^| findstr :8000
+    start "" http://127.0.0.1:8000
+    echo.
+    pause
+    goto menu
+)
 echo 正在启动 WebUI + HTTP API（127.0.0.1:8000）...
 start "multiagent server" cmd /k ".venv\Scripts\python.exe -m app.server"
 timeout /t 2 /nobreak >nul

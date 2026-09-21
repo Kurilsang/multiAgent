@@ -4,7 +4,7 @@
 
 ## 项目定位
 
-内部网关场景特化的多厂商 LLM 对话服务（DeepSeek / GLM / MiniMax，均走 OpenAI 兼容 API），双入口：终端 CLI + FastAPI WebUI/HTTP API。当前是第一步：纯对话。
+内部网关场景特化的多厂商 LLM 对话服务（DeepSeek / GLM / MiniMax，均走 OpenAI 兼容 API），双入口：终端 CLI + FastAPI WebUI/HTTP API。当前是第二步：ReAct 式单 Agent 自主执行循环（工具调用 + 全链路流式）。术语表见 [CONTEXT.md](CONTEXT.md)。
 
 ## 怎么跑
 
@@ -25,14 +25,17 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 ## 目录与约定
 
 - `app/config.py` — 厂商注册表 + 目标解析；`LLM_MODEL` 只对默认厂商生效；`<厂商>_BASE_URL` 可覆盖端点（GLM Coding Plan 必须指向编码端点）
-- `app/llm.py` — OpenAI SDK 封装；非流式 = 聚合流式实现；120s 超时；错误转译成面向用户的中文
-- `app/conversation.py` — 单会话内存历史，按 `MAX_CONTEXT_MESSAGES` 截断（保留 system + 最近 N 条）
-- `app/cli.py` / `app/server.py` — 两个入口；server 的 `/chat` 用线程锁串行化，定位单用户/低并发
-- `app/static/index.html` — 无框架单文件 WebUI
+- `app/llm.py` — OpenAI SDK 封装；非流式 = 聚合流式实现；`chat_events` 产出 TextDelta/ResponseToolCalls；120s 超时；错误转译成面向用户的中文
+- `app/conversation.py` — 主对话内存历史，按 `MAX_CONTEXT_MESSAGES` 截断（保留 system + 最近 N 条）
+- `app/agent.py` — ReAct 状态机引擎（见 docs/adr/0001、0002）：任务轨迹独立于主对话，双层终止（finish 工具 + `AGENT_MAX_ITERATIONS` 硬上限 + 死循环止损）；技能走上下文通道
+- `app/tools.py` — 工具注册表（function calling 通道）+ 占位工具集；新增工具只改注册表，引擎不感知
+- `app/cli.py` / `app/server.py` — 两个入口；server 的 `/chat`、`/chat/stream`、`/agent/stream` 共用线程锁串行化，定位单用户/低并发
+- `app/static/index.html` — 无框架单文件 WebUI（聊天流式 + 任务时间线）
+- `tests/fakes.py` — 预约定测试缝隙：脚本化 LLM fake；测试不发真实请求
 - 约定：新增厂商只改 `config.py` 的 `PROVIDERS` + `.env`；错误信息从用户视角写；配置类改动要同步 `.env.example` 和 README
 
 ## 当前状态与下一步
 
-- 已完成：三厂商对话、上下文截断、运行时切厂商、CLI 流式输出、WebUI + 非流式 HTTP API
-- 已知限制：重启后历史清空；HTTP API 暂非流式
-- 下一步：工具调用（function calling）、多会话持久化、SSE 流式 API、网关逻辑（路由/鉴权/审计）
+- 已完成：三厂商对话、上下文截断、运行时切厂商、ReAct 单 Agent 循环（function calling + 工具/技能注册表）、CLI + WebUI 全链路流式 SSE、双层终止与死循环止损
+- 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`），无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复
+- 下一步：多 Agent 协作（状态机已留后门：新增状态与迁移边）、MCP 工具适配器（灌入同一注册表）、多会话持久化、网关逻辑（路由/鉴权/审计）

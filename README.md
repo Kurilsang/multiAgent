@@ -1,13 +1,15 @@
 # multiagent
 
-针对内部网关场景特化的 Agent 项目。第一步：多厂商大模型对话对接（DeepSeek / GLM / MiniMax），支持上下文与运行时切换厂商。
+针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式。
 
 ## 特性
 
 - **统一接入**：三家厂商均通过 OpenAI 兼容 API 接入，一个 SDK 覆盖全部
 - **上下文支持**：内存维护单会话历史，自动按上限截断（保留 system + 最近 N 条）
+- **Agent 任务**：`/agent` 发起自主多步任务——状态机编排（见 docs/adr/0001）、双层终止（见 docs/adr/0002）、死循环止损、partial 进展摘要
+- **工具 + 技能**：工具走 function calling 通道，技能走上下文通道（占位集：`get_current_time` / `calculator` + 「时间报告」演示技能）
 - **运行时切换**：CLI 中 `/model glm` 随时切换厂商；API 请求中传 `provider` 字段
-- **流式输出**：CLI 逐字流式显示回复
+- **全链路流式**：聊天逐 token SSE；Agent 任务思考逐字实时转发、动作/观察按步推送
 - **双入口**：终端 CLI + HTTP API（FastAPI）
 
 ## 快速开始
@@ -38,6 +40,7 @@ python -m app.cli --provider deepseek
 |------|------|
 | `/model` | 查看可用厂商及配置状态 |
 | `/model <name>` | 切换厂商（deepseek / glm / minimax） |
+| `/agent <任务>` | 发起自主多步任务（ReAct 循环，完成后答案回写主对话） |
 | `/reset` | 清空对话上下文 |
 | `/help` | 帮助 |
 | `/exit` | 退出 |
@@ -54,6 +57,18 @@ curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "你好", "provider": "glm"}'
 
+# 聊天流式（逐 token SSE；curl -N 关闭缓冲）
+curl -N -X POST http://127.0.0.1:8000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "你好"}'
+# 事件: {"type":"delta","text":"..."} ... {"type":"done","provider":"...","model":"..."}
+
+# Agent 任务流式（思考逐字转发，动作/观察按步推送，终态带原因）
+curl -N -X POST http://127.0.0.1:8000/agent/stream \
+  -H "Content-Type: application/json" \
+  -d '{"task": "现在时间加 3 天是星期几"}'
+# 事件: task_started / thought_delta / action / observation / final | failed
+
 # 清空对话上下文
 curl -X POST http://127.0.0.1:8000/reset
 
@@ -67,22 +82,42 @@ curl http://127.0.0.1:8000/providers
 ```
 app/
 ├── config.py        # .env 加载、厂商注册表、目标解析（支持按厂商覆盖 base_url）
-├── llm.py           # OpenAI SDK 统一封装（流式/非流式、错误转译）
-├── conversation.py  # 会话历史管理与截断
-├── cli.py           # 终端入口
-├── server.py        # HTTP API + WebUI 入口
+├── llm.py           # OpenAI SDK 统一封装（流式/非流式、function calling、错误转译）
+├── conversation.py  # 主对话历史管理与截断
+├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、技能通道
+├── tools.py         # 工具注册表 + 占位工具集（get_current_time / calculator）
+├── cli.py           # 终端入口（/chat 流式 + /agent 任务）
+├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream）
 └── static/
-    └── index.html   # WebUI 聊天页面（无框架，单文件）
+    └── index.html   # WebUI（聊天流式 + 任务时间线，无框架，单文件）
 tests/
+├── fakes.py             # 脚本化 LLM fake（预约定测试缝隙）
 ├── test_config.py
-└── test_conversation.py
+├── test_conversation.py
+├── test_tools.py
+├── test_llm_tools.py
+├── test_agent.py
+└── test_server_stream.py
 ```
+
+术语表见 [CONTEXT.md](CONTEXT.md)；架构决策见 [docs/adr/](docs/adr/)。
 
 ## 配置说明
 
-见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）。
+见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）；`AGENT_MAX_ITERATIONS` 控制 Agent 任务的最大思考轮数（最小 1，超过则以 partial 进展摘要收尾）。
 
 如需按厂商覆盖接入端点，设置 `<厂商>_BASE_URL`（如 `GLM_BASE_URL`）。典型场景：GLM Coding Plan 套餐 Key 只对编码专用端点生效，需设置 `GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`，否则标准端点会报 1113 余额不足。
+
+## 三厂商 function calling 冒烟
+
+Agent 任务依赖各家端点支持 function calling（OpenAI tools 协议）。验收方式：对每家厂商执行
+
+```bash
+python -m app.cli --provider <厂商>
+/agent 现在时间加 3 天是星期几
+```
+
+预期：至少经过一次 `行动: get_current_time` 或 `行动: calculator`，最终给出正确答案。端点不支持 tools 时会返回明确的中文错误（不做文本协议降级），此时请更换厂商。GLM Coding Plan 套餐 Key 需设置编码专用端点（见配置说明）。
 
 ## 运行测试
 
@@ -90,14 +125,18 @@ tests/
 python -m unittest discover tests -v
 ```
 
+测试不发起真实请求：LLM 层用脚本化 fake（tests/fakes.py），工具为纯函数占位集。
+
 ## 已知范围限制
 
-- 单会话内存上下文：服务重启后历史清空；`/chat` 接口内部已加锁串行化，适合单用户/低并发使用
-- HTTP API 暂为非流式返回，SSE 在后续规划中
+- 单会话内存上下文：服务重启后历史与任务轨迹清空；接口内部已加锁串行化，适合单用户/低并发使用
+- Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
+- MCP 工具接入未实现：工具注册表已预留适配位（远端工具灌入同一注册表即可）
+- SSE 断连后任务不恢复，页面重开需重新发起
 
 ## 后续规划
 
-- 工具调用（function calling）与 Agent 化
+- 多 Agent 协作（评审者/执行者分工，复用状态机引擎）
+- MCP 工具适配器
 - 多会话管理与持久化
-- 流式 API（SSE）
 - 网关特化逻辑（路由、鉴权、审计）

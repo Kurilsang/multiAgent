@@ -13,14 +13,15 @@
     POST /reset           清空对话上下文
 """
 
+import json
 import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from .config import PROVIDERS, ConfigError, Settings
+from .config import PROVIDERS, ConfigError, Settings, resolve_target
 from .conversation import Conversation
 from .llm import LLMClient, LLMError
 
@@ -107,6 +108,48 @@ def chat(req: ChatRequest) -> ChatResponse:
         conversation.add("assistant", result.content)
     return ChatResponse(
         reply=result.content, provider=result.provider, model=result.model
+    )
+
+
+def _sse(data: dict) -> str:
+    """编码一条 SSE 事件帧。"""
+    return "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+
+
+@app.post("/chat/stream")
+def chat_stream(req: ChatRequest) -> StreamingResponse:
+    """逐 token SSE 聊天；行为与 /chat 一致，改为流式推送。
+
+    非 200 的配置错误在开流之前抛出（仍是 HTTP 状态码），
+    开流之后的上游错误以 error 事件帧推送。
+    """
+    try:
+        target = resolve_target(settings, req.provider, req.model)
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def generate():
+        with _chat_lock:
+            conversation.add("user", req.message)
+            collected: list[str] = []
+            try:
+                for chunk in llm.chat_stream(
+                    conversation.messages_for_api(), req.provider, req.model
+                ):
+                    collected.append(chunk)
+                    yield _sse({"type": "delta", "text": chunk})
+                conversation.add("assistant", "".join(collected))
+                yield _sse(
+                    {"type": "done", "provider": target.provider, "model": target.model}
+                )
+            except LLMError as exc:
+                conversation.pop_last()
+                yield _sse({"type": "error", "detail": str(exc)})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
     )
 
 

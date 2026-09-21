@@ -118,15 +118,37 @@ function addMessage(role, text, meta) {
   bubble.className = 'bubble';
   bubble.textContent = text;
   wrap.appendChild(bubble);
-  if (meta) {
-    const m = document.createElement('div');
-    m.className = 'meta';
-    m.textContent = meta;
-    wrap.appendChild(m);
-  }
+  if (meta) addMeta(wrap, meta);
   chatEl.appendChild(wrap);
   scrollToBottom();
   return wrap;
+}
+
+function addMeta(wrap, text) {
+  const m = document.createElement('div');
+  m.className = 'meta';
+  m.textContent = text;
+  wrap.appendChild(m);
+}
+
+// 解析 SSE 字节流为事件对象（data: {...}\n\n）
+async function* readSse(stream) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('data: ')) yield JSON.parse(line.slice(6));
+      }
+    }
+  }
 }
 
 function addTyping() {
@@ -164,10 +186,10 @@ async function send() {
   addMessage('user', text);
 
   const typing = addTyping();
+  const body = { message: text };
+  if (providerEl.value) body.provider = providerEl.value;
   try {
-    const body = { message: text };
-    if (providerEl.value) body.provider = providerEl.value;
-    const res = await fetch('/chat', {
+    const res = await fetch('/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -178,10 +200,23 @@ async function send() {
       const detail = typeof (err && err.detail) === 'string'
         ? err.detail : (err && err.detail ? JSON.stringify(err.detail) : 'HTTP ' + res.status);
       addMessage('error', '出错了：' + detail);
-    } else {
-      const data = await res.json();
-      addMessage('assistant', data.reply, data.provider + ' / ' + data.model);
+      return;
     }
+    const wrap = addMessage('assistant', '');
+    const bubble = wrap.querySelector('.bubble');
+    for await (const evt of readSse(res.body)) {
+      if (evt.type === 'delta') {
+        bubble.textContent += evt.text;
+        scrollToBottom();
+      } else if (evt.type === 'done') {
+        addMeta(wrap, evt.provider + ' / ' + evt.model);
+      } else if (evt.type === 'error') {
+        wrap.classList.add('error');
+        bubble.textContent = '出错了：' + evt.detail;
+      }
+    }
+    if (!bubble.textContent) bubble.textContent = '（空回复）';
+    scrollToBottom();
   } catch (e) {
     typing.remove();
     addMessage('error', '网络错误：' + e.message);

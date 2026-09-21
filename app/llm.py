@@ -20,10 +20,37 @@ class LLMError(Exception):
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    """模型发起的一次工具调用；arguments 为原始 JSON 串，由调用方解析。"""
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
 class ChatResult:
     content: str
     provider: str
     model: str
+    tool_calls: tuple[ToolCall, ...] = ()
+
+
+# ---- 流式事件：引擎据此实时转发思考并拿到结构化工具调用 ----
+
+
+@dataclass(frozen=True)
+class TextDelta:
+    """一段增量回复文本。"""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ResponseToolCalls:
+    """流结束时的聚合工具调用（若无则为空，事件本身不出现）。"""
+
+    tool_calls: tuple[ToolCall, ...]
 
 
 class LLMClient:
@@ -54,11 +81,23 @@ class LLMClient:
         messages: list[dict],
         provider: str | None = None,
         model: str | None = None,
+        tools: list[dict] | None = None,
     ) -> ChatResult:
-        """非流式对话，返回完整回复。"""
+        """非流式对话，返回完整回复与（可能的）工具调用。"""
         target = resolve_target(self._settings, provider, model)
-        content = "".join(self._stream(target, messages))
-        return ChatResult(content=content, provider=target.provider, model=target.model)
+        content_parts: list[str] = []
+        tool_calls: tuple[ToolCall, ...] = ()
+        for event in self.chat_events(messages, provider, model, tools):
+            if isinstance(event, TextDelta):
+                content_parts.append(event.text)
+            else:
+                tool_calls = event.tool_calls
+        return ChatResult(
+            content="".join(content_parts),
+            provider=target.provider,
+            model=target.model,
+            tool_calls=tool_calls,
+        )
 
     def chat_stream(
         self,
@@ -67,26 +106,73 @@ class LLMClient:
         model: str | None = None,
     ) -> Iterator[str]:
         """流式对话，逐段产出回复文本。"""
-        target = resolve_target(self._settings, provider, model)
-        return self._stream(target, messages)
+        for event in self.chat_events(messages, provider, model):
+            if isinstance(event, TextDelta):
+                yield event.text
 
-    def _stream(self, target: ResolvedTarget, messages: list[dict]) -> Iterator[str]:
+    def chat_events(
+        self,
+        messages: list[dict],
+        provider: str | None = None,
+        model: str | None = None,
+        tools: list[dict] | None = None,
+    ) -> Iterator[TextDelta | ResponseToolCalls]:
+        """流式对话事件：逐段产出 TextDelta，流结束时若有工具调用再产出
+        ResponseToolCalls。引擎据此实时转发思考文本并获取结构化动作。"""
+        target = resolve_target(self._settings, provider, model)
         client = self._client_for(target)
+        extra = {"tools": tools} if tools else {}
+        # 各厂商分片习惯不同，tool_calls 统一按 index 聚合
+        pending: dict[int, dict] = {}
         try:
             stream = client.chat.completions.create(
                 model=target.model,
                 messages=messages,
                 stream=True,
+                **extra,
             )
             for chunk in stream:
                 if not chunk.choices:
                     continue
                 # 部分 OpenAI 兼容网关会发出 delta 为 None/空的 chunk，取值需容错
-                content = getattr(chunk.choices[0].delta, "content", None)
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None)
                 if content:
-                    yield content
+                    yield TextDelta(content)
+                _accumulate_tool_calls(pending, getattr(delta, "tool_calls", None))
         except Exception as exc:
             raise LLMError(_friendly_error(target.provider, exc)) from exc
+        if pending:
+            yield ResponseToolCalls(tuple(_materialize_tool_calls(pending)))
+
+
+def _accumulate_tool_calls(pending: dict[int, dict], chunks) -> None:
+    """把增量 tool_calls 分片按 index 聚合进 pending（原地更新）。
+
+    各厂商分片习惯不同：有的首片带全量，有的把 arguments 拆成多段，
+    统一按 index 聚合、字符串片段拼接。
+    """
+    for chunk in chunks or ():
+        slot = pending.setdefault(chunk.index, {"id": "", "name": "", "parts": []})
+        if chunk.id:
+            slot["id"] = chunk.id
+        function = getattr(chunk, "function", None)
+        if function is not None:
+            if function.name:
+                slot["name"] = function.name
+            if function.arguments:
+                slot["parts"].append(function.arguments)
+
+
+def _materialize_tool_calls(pending: dict[int, dict]) -> Iterator[ToolCall]:
+    """把聚合结果按 index 顺序物化为 ToolCall。"""
+    for index in sorted(pending):
+        slot = pending[index]
+        yield ToolCall(
+            id=slot["id"] or f"call_{index}",
+            name=slot["name"],
+            arguments="".join(slot["parts"]),
+        )
 
 
 def _friendly_error(provider: str, exc: Exception) -> str:

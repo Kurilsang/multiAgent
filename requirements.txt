@@ -1,0 +1,5 @@
+openai>=1.40
+pydantic-settings>=2.3
+fastapi>=0.110
+uvicorn>=0.29
+rich>=13.7

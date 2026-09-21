@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multiagent 对话</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #161a23;
+    --panel-2: #1d2230;
+    --border: #2a3040;
+    --text: #e6e9f0;
+    --muted: #8b93a7;
+    --accent: #4f8cff;
+    --accent-2: #2f6fe0;
+    --user-bubble: #2b5fd9;
+    --assistant-bubble: #1d2230;
+    --error: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  select, button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  select:hover, button:hover { border-color: var(--accent); }
+  #clear-btn:hover { border-color: var(--error); color: var(--error); }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 20px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .msg { max-width: 72%; display: flex; flex-direction: column; gap: 4px; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.assistant { align-self: flex-start; align-items: flex-start; }
+  .bubble {
+    padding: 10px 14px; border-radius: 12px; line-height: 1.6;
+    white-space: pre-wrap; word-break: break-word; font-size: 14px;
+  }
+  .msg.user .bubble { background: var(--user-bubble); border-bottom-right-radius: 4px; }
+  .msg.assistant .bubble { background: var(--assistant-bubble); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .meta { font-size: 11px; color: var(--muted); }
+  .msg.error .bubble { background: transparent; border: 1px solid var(--error); color: var(--error); border-radius: 12px; }
+  .typing { display: inline-flex; gap: 4px; padding: 12px 16px; }
+  .typing span {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
+    animation: blink 1.2s infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+  footer {
+    display: flex; gap: 10px; padding: 14px 20px;
+    background: var(--panel); border-top: 1px solid var(--border);
+  }
+  #input {
+    flex: 1; resize: none; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; font-size: 14px; font-family: inherit;
+    height: 46px; max-height: 140px; outline: none;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send-btn {
+    background: var(--accent-2); border: none; color: #fff;
+    padding: 0 22px; border-radius: 10px; font-size: 14px;
+  }
+  #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #send-btn:hover:not(:disabled) { background: var(--accent); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>multiagent</h1>
+    <span class="meta" id="default-hint"></span>
+    <div class="spacer"></div>
+    <select id="provider-select" title="选择厂商">
+      <option value="">默认厂商</option>
+    </select>
+    <button id="clear-btn" title="清空服务端对话上下文并清屏">清空</button>
+  </header>
+
+  <div id="chat">
+    <div class="msg assistant"><div class="bubble">你好！我是 multiagent，输入消息开始对话。</div></div>
+  </div>
+
+  <footer>
+    <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行" autofocus></textarea>
+    <button id="send-btn">发送</button>
+  </footer>
+
+<script>
+const chatEl = document.getElementById('chat');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('send-btn');
+const clearBtn = document.getElementById('clear-btn');
+const providerEl = document.getElementById('provider-select');
+const defaultHintEl = document.getElementById('default-hint');
+let busy = false;
+
+function scrollToBottom() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function addMessage(role, text, meta) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + role;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  if (meta) {
+    const m = document.createElement('div');
+    m.className = 'meta';
+    m.textContent = meta;
+    wrap.appendChild(m);
+  }
+  chatEl.appendChild(wrap);
+  scrollToBottom();
+  return wrap;
+}
+
+function addTyping() {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant';
+  wrap.innerHTML = '<div class="bubble typing"><span></span><span></span><span></span></div>';
+  chatEl.appendChild(wrap);
+  scrollToBottom();
+  return wrap;
+}
+
+async function loadProviders() {
+  try {
+    const res = await fetch('/providers');
+    const data = await res.json();
+    defaultHintEl.textContent = '默认: ' + data.default;
+    for (const [name, info] of Object.entries(data.providers)) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name + (info.configured ? '' : '（未配置 Key）');
+      if (!info.configured) opt.disabled = true;
+      if (name === data.default) opt.textContent += '（默认）';
+      providerEl.appendChild(opt);
+    }
+  } catch (e) { /* 服务不可用时静默 */ }
+}
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text || busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  inputEl.value = '';
+  inputEl.style.height = '46px';
+  addMessage('user', text);
+
+  const typing = addTyping();
+  try {
+    const body = { message: text };
+    if (providerEl.value) body.provider = providerEl.value;
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    typing.remove();
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      const detail = typeof (err && err.detail) === 'string'
+        ? err.detail : (err && err.detail ? JSON.stringify(err.detail) : 'HTTP ' + res.status);
+      addMessage('error', '出错了：' + detail);
+    } else {
+      const data = await res.json();
+      addMessage('assistant', data.reply, data.provider + ' / ' + data.model);
+    }
+  } catch (e) {
+    typing.remove();
+    addMessage('error', '网络错误：' + e.message);
+  } finally {
+    busy = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+}
+
+async function clearChat() {
+  try { await fetch('/reset', { method: 'POST' }); } catch (e) { /* 忽略 */ }
+  chatEl.innerHTML = '';
+  addMessage('assistant', '已清空对话上下文。');
+}
+
+sendBtn.addEventListener('click', send);
+clearBtn.addEventListener('click', clearChat);
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = '46px';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+});
+
+loadProviders();
+inputEl.focus();
+</script>
+</body>
+</html>

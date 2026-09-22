@@ -55,7 +55,10 @@ _chat_lock = threading.Lock()
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="multiagent", description="内部网关场景 Agent —— 第一步：多厂商 LLM 对话")
+app = FastAPI(
+    title="multiagent",
+    description="内部网关场景 Agent —— 第二步：ReAct 单 Agent（多厂商对话 + 工具调用 + 全链路流式）",
+)
 
 
 @app.get("/", include_in_schema=False)

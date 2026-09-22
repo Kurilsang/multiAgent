@@ -33,6 +33,19 @@ class ConversationTest(unittest.TestCase):
         messages[0]["content"] = "mutated"
         self.assertEqual(conv.messages_for_api()[0]["content"], "hi")
 
+    def test_history_returns_full_snapshot_copies(self):
+        conv = Conversation(max_messages=2)
+        for i in range(5):
+            conv.add("user", f"u{i}")
+            conv.add("assistant", f"a{i}")
+        history = conv.history()
+        # 导出用完整快照，不受 messages_for_api 的截断影响
+        self.assertEqual(len(history), 10)
+        self.assertEqual(history[0]["content"], "u0")
+        self.assertEqual(history[-1]["content"], "a4")
+        history[0]["content"] = "mutated"
+        self.assertEqual(conv.history()[0]["content"], "u0")
+
     def test_pop_last_rolls_back(self):
         conv = Conversation(max_messages=4)
         conv.add("user", "hi")

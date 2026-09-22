@@ -35,6 +35,10 @@ class Conversation:
         messages.extend(dict(m) for m in self._history[-self._max_messages :])
         return messages
 
+    def history(self) -> list[dict]:
+        """完整历史快照（消息为拷贝），供导出等只读用途；不受截断影响。"""
+        return [dict(m) for m in self._history]
+
     def reset(self) -> None:
         self._history.clear()
 

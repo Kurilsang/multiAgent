@@ -7,11 +7,12 @@
 
 接口:
     GET  /                WebUI 聊天页面
-    GET  /health          健康检查
+    GET  /health          健康检查（含 app 身份标识，供 run.bat 识别端口占用者）
     GET  /providers       列出厂商及配置状态
     POST /chat            发送一条消息 {"message": "...", "provider": "glm"(可选), "model": "..."(可选)}
-    POST /chat/stream     同 /chat，逐 token SSE 流式推送
+    POST /chat/stream     同 /chat，逐 token SSE 流式推送（含 reasoning_delta 思考帧）
     POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
+    GET  /export          导出主对话历史，?format=markdown(默认)|json
     POST /reset           清空对话上下文
 """
 
@@ -20,7 +21,7 @@ import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .agent import (
@@ -35,7 +36,8 @@ from .agent import (
 )
 from .config import PROVIDERS, ConfigError, Settings, resolve_target
 from .conversation import Conversation
-from .llm import LLMClient, LLMError
+from .export import to_json, to_markdown
+from .llm import LLMClient, LLMError, ReasoningDelta
 from .tools import default_registry
 
 settings = Settings()
@@ -88,7 +90,12 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    """健康检查。
+
+    app 字段是本服务的身份标识：run.bat 在启动前探测目标端口，
+    只有 /health 自报 multiagent 才会 kill 旧实例，避免误杀其他服务。
+    """
+    return {"status": "ok", "app": "multiagent"}
 
 
 @app.get("/providers")
@@ -110,6 +117,27 @@ def reset() -> dict:
     with _chat_lock:
         conversation.reset()
     return {"status": "ok"}
+
+
+@app.get("/export")
+def export_conversation(format: str = "markdown") -> Response:
+    """导出主对话历史：markdown 便于直接粘贴给 AI 排障，json 供程序处理。"""
+    with _chat_lock:
+        messages = conversation.history()
+    fmt = format.strip().lower()
+    if fmt in ("markdown", "md"):
+        return Response(
+            to_markdown(messages, default_provider=settings.llm_provider),
+            media_type="text/markdown; charset=utf-8",
+        )
+    if fmt == "json":
+        return Response(
+            to_json(messages, default_provider=settings.llm_provider),
+            media_type="application/json; charset=utf-8",
+        )
+    raise HTTPException(
+        status_code=400, detail=f"不支持的导出格式: {format!r}，可选 markdown / json"
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -144,6 +172,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 
     非 200 的配置错误在开流之前抛出（仍是 HTTP 状态码），
     开流之后的上游错误以 error 事件帧推送。
+    思考链以 reasoning_delta 帧透传展示，不写入主对话历史。
     """
     try:
         target = resolve_target(settings, req.provider, req.model)
@@ -155,11 +184,14 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             conversation.add("user", req.message)
             collected: list[str] = []
             try:
-                for chunk in llm.chat_stream(
+                for event in llm.chat_events(
                     conversation.messages_for_api(), req.provider, req.model
                 ):
-                    collected.append(chunk)
-                    yield _sse({"type": "delta", "text": chunk})
+                    if isinstance(event, ReasoningDelta):
+                        yield _sse({"type": "reasoning_delta", "text": event.text})
+                    else:
+                        collected.append(event.text)
+                        yield _sse({"type": "delta", "text": event.text})
                 conversation.add("assistant", "".join(collected))
                 yield _sse(
                     {"type": "done", "provider": target.provider, "model": target.model}

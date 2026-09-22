@@ -36,6 +36,6 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 
 ## 当前状态与下一步
 
-- 已完成：三厂商对话、上下文截断、运行时切厂商、ReAct 单 Agent 循环（function calling + 工具/技能注册表）、CLI + WebUI 全链路流式 SSE、双层终止与死循环止损
+- 已完成：三厂商对话、上下文截断、运行时切厂商、ReAct 单 Agent 循环（function calling + 工具/技能注册表）、CLI + WebUI 全链路流式 SSE、双层终止与死循环止损、思考链统一转写与展示（reasoning_content / 内联 `<think>` → ReasoningDelta）、对话导出（WebUI 导出按钮、CLI `/export`、HTTP `GET /export`）
 - 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`），无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复
 - 下一步：多 Agent 协作（状态机已留后门：新增状态与迁移边）、MCP 工具适配器（灌入同一注册表）、多会话持久化、网关逻辑（路由/鉴权/审计）

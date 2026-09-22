@@ -8,6 +8,7 @@
     /model            查看可用厂商及当前目标
     /model <name>     切换厂商（如 /model deepseek）
     /agent <任务>     发起自主多步任务（思考→行动→观察→判断）
+    /export [路径]    导出对话记录为 Markdown（缺省写到当前目录）
     /reset            清空对话上下文
     /help             显示帮助
     /exit             退出
@@ -16,6 +17,8 @@
 import argparse
 import json
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from pydantic import ValidationError
 from rich.console import Console
@@ -40,7 +43,8 @@ from .config import (
     resolve_target,
 )
 from .conversation import Conversation
-from .llm import LLMClient, LLMError
+from .export import to_markdown
+from .llm import LLMClient, LLMError, ReasoningDelta
 from .tools import default_registry
 
 console = Console()
@@ -49,6 +53,7 @@ HELP_TEXT = """[bold]命令[/bold]
   /model            查看可用厂商及当前目标
   /model <name>     切换厂商（deepseek / glm / minimax）
   /agent <任务>     发起自主多步任务（ReAct 循环）
+  /export [路径]    导出对话记录为 Markdown（可直接粘贴给 AI 排障）
   /reset            清空对话上下文
   /exit             退出"""
 
@@ -76,11 +81,22 @@ def chat_once(
     conversation.add("user", user_input)
     console.print("[bold magenta]assistant[/bold magenta] > ", end="")
     collected: list[str] = []
+    in_thought = False
     try:
-        for chunk in llm.chat_stream(conversation.messages_for_api(), provider, model):
-            # 模型输出必须按纯文本打印：其中的 '[' 会被 rich 当作标记解析导致崩溃
-            console.print(chunk, end="", markup=False, highlight=False)
-            collected.append(chunk)
+        for event in llm.chat_events(conversation.messages_for_api(), provider, model):
+            if isinstance(event, ReasoningDelta):
+                if not in_thought:
+                    console.print()
+                    console.print("[dim]思考[/dim] > ", end="")
+                    in_thought = True
+                # 模型输出按纯文本打印，避免 rich 把 '[' 当标记解析
+                console.print(event.text, end="", markup=False, highlight=False)
+            else:
+                if in_thought:
+                    console.print()
+                    in_thought = False
+                console.print(event.text, end="", markup=False, highlight=False)
+                collected.append(event.text)
     except KeyboardInterrupt:
         conversation.pop_last()
         console.print()
@@ -224,6 +240,26 @@ def main() -> int:
                 console.print("[yellow]用法: /agent <任务描述>[/yellow]")
                 continue
             run_agent_task(agent, conversation, task, current_provider, current_model)
+            continue
+        if command == "/export":
+            arg = user_input[len("/export") :].strip()
+            path = (
+                Path(arg)
+                if arg
+                else Path(f"multiagent-export-{datetime.now():%Y%m%d-%H%M%S}.md")
+            )
+            messages = conversation.history()
+            if not messages:
+                console.print("[yellow]当前没有可导出的对话记录[/yellow]")
+                continue
+            path.write_text(
+                to_markdown(messages, default_provider=settings.llm_provider),
+                encoding="utf-8",
+            )
+            console.print(
+                f"[green]已导出 {len(messages)} 条消息 → "
+                f"{escape(str(path.resolve()))}[/green]"
+            )
             continue
         if command == "/model":
             if len(parts) == 1:

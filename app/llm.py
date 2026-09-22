@@ -47,6 +47,13 @@ class TextDelta:
 
 
 @dataclass(frozen=True)
+class ReasoningDelta:
+    """一段思考链增量（模型在正式回答之外的推理过程）。"""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class ResponseToolCalls:
     """流结束时的聚合工具调用（若无则为空，事件本身不出现）。"""
 
@@ -116,9 +123,23 @@ class LLMClient:
         provider: str | None = None,
         model: str | None = None,
         tools: list[dict] | None = None,
-    ) -> Iterator[TextDelta | ResponseToolCalls]:
-        """流式对话事件：逐段产出 TextDelta，流结束时若有工具调用再产出
-        ResponseToolCalls。引擎据此实时转发思考文本并获取结构化动作。"""
+    ) -> Iterator[TextDelta | ReasoningDelta | ResponseToolCalls]:
+        """流式对话事件：TextDelta 回复增量、ReasoningDelta 思考增量，
+        流结束时若有工具调用再产出 ResponseToolCalls。
+
+        思考链有两个来源，统一转写成 ReasoningDelta：
+        reasoning_content 独立字段（GLM / DeepSeek 思考模型），以及
+        content 内联的 <think>…</think> 段落（MiniMax M 系列）。
+        """
+        return _unify_thinking(self._request_events(messages, provider, model, tools))
+
+    def _request_events(
+        self,
+        messages: list[dict],
+        provider: str | None = None,
+        model: str | None = None,
+        tools: list[dict] | None = None,
+    ) -> Iterator[TextDelta | ReasoningDelta | ResponseToolCalls]:
         target = resolve_target(self._settings, provider, model)
         client = self._client_for(target)
         extra = {"tools": tools} if tools else {}
@@ -136,6 +157,9 @@ class LLMClient:
                     continue
                 # 部分 OpenAI 兼容网关会发出 delta 为 None/空的 chunk，取值需容错
                 delta = chunk.choices[0].delta
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    yield ReasoningDelta(reasoning)
                 content = getattr(delta, "content", None)
                 if content:
                     yield TextDelta(content)
@@ -144,6 +168,53 @@ class LLMClient:
             raise LLMError(_friendly_error(target.provider, exc)) from exc
         if pending:
             yield ResponseToolCalls(tuple(_materialize_tool_calls(pending)))
+
+
+# ---- 思考链统一转写：各厂商思考形态不同，对外只暴露 ReasoningDelta ----
+
+THINK_OPEN_TAG = "<think>"
+THINK_CLOSE_TAG = "</think>"
+
+
+def _partial_tag_len(text: str, tag: str) -> int:
+    """text 末尾疑似 tag 前缀的最大长度；用于标签被分片拆开时的缓冲。"""
+    for size in range(min(len(text), len(tag) - 1), 0, -1):
+        if text.endswith(tag[:size]):
+            return size
+    return 0
+
+
+def _unify_thinking(events) -> Iterator[TextDelta | ReasoningDelta | ResponseToolCalls]:
+    """流式转写：reasoning_content 增量直接透传；content 里内联的
+    <think>…</think> 段落被剥离并转写为 ReasoningDelta，标签本身
+    不会出现在任何事件里（即使标签被拆到多个分片中）。
+
+    疑似标签前缀的尾巴（最多 7 字符）会一直缓冲到能判定为止，
+    因此可以跨非文本事件（如 ResponseToolCalls）存活；流结束时兜底冲出。
+    """
+    in_think = False
+    carry = ""
+    for event in events:
+        if not isinstance(event, TextDelta):
+            yield event
+            continue
+        buffer = carry + event.text
+        carry = ""
+        while buffer:
+            tag = THINK_CLOSE_TAG if in_think else THINK_OPEN_TAG
+            index = buffer.find(tag)
+            if index >= 0:
+                head, buffer = buffer[:index], buffer[index + len(tag) :]
+            else:
+                keep = _partial_tag_len(buffer, tag)
+                head, carry = buffer[: len(buffer) - keep], buffer[len(buffer) - keep :]
+                buffer = ""
+            if head:
+                yield ReasoningDelta(head) if in_think else TextDelta(head)
+            if index >= 0:
+                in_think = not in_think
+    if carry:
+        yield ReasoningDelta(carry) if in_think else TextDelta(carry)
 
 
 def _accumulate_tool_calls(pending: dict[int, dict], chunks) -> None:

@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 
-from .llm import LLMError, ResponseToolCalls, TextDelta
+from .llm import LLMError, ReasoningDelta, ResponseToolCalls, TextDelta
 from .tools import ToolRegistry
 
 # 判断节点连续看到相同（工具, 参数）达此次数即判死循环
@@ -271,6 +271,9 @@ class AgentEngine:
                     for event in stream:
                         if isinstance(event, TextDelta):
                             thought_parts.append(event.text)
+                            yield ThoughtDelta(text=event.text)
+                        elif isinstance(event, ReasoningDelta):
+                            # 思考链只透传展示，不写入轨迹：历史回放只保留正式内容
                             yield ThoughtDelta(text=event.text)
                         elif isinstance(event, ResponseToolCalls):
                             calls = list(event.tool_calls)

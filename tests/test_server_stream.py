@@ -18,19 +18,19 @@ from app.agent import (
     TaskStarted,
     ThoughtDelta,
 )
-from app.llm import LLMError
+from app.llm import LLMError, ReasoningDelta, TextDelta
 
 
 class FakeStreamLLM:
-    """模拟 chat_stream：按脚本吐文本块。"""
+    """模拟 chat_events：按脚本吐事件。"""
 
-    def __init__(self, chunks):
-        self.chunks = chunks
+    def __init__(self, events):
+        self.events = events
         self.seen_messages = []
 
-    def chat_stream(self, messages, provider=None, model=None):
+    def chat_events(self, messages, provider=None, model=None, tools=None):
         self.seen_messages.append([dict(m) for m in messages])
-        yield from self.chunks
+        yield from self.events
 
 
 class FakeErrorLLM:
@@ -39,7 +39,7 @@ class FakeErrorLLM:
     def __init__(self, error):
         self.error = error
 
-    def chat_stream(self, messages, provider=None, model=None):
+    def chat_events(self, messages, provider=None, model=None, tools=None):
         raise self.error
         yield  # pragma: no cover - 使本函数成为生成器
 
@@ -87,7 +87,7 @@ class ChatStreamTest(unittest.TestCase):
         return frames
 
     def test_chat_stream_emits_deltas_then_done(self):
-        fake = FakeStreamLLM(["你", "好"])
+        fake = FakeStreamLLM([TextDelta("你"), TextDelta("好")])
         server.llm = fake
         with self.client.stream(
             "POST", "/chat/stream", json={"message": "hi"}
@@ -102,6 +102,26 @@ class ChatStreamTest(unittest.TestCase):
         self.assertEqual(frames[2]["provider"], "glm")
         # 任务结束后「请求 + 回复」回写主对话
         self.assertEqual(len(server.conversation), 2)
+
+    def test_reasoning_forwarded_but_not_stored(self):
+        """思考链以 reasoning_delta 帧透传展示，主对话只保留正式回复。"""
+        server.llm = FakeStreamLLM([ReasoningDelta("我先想一想"), TextDelta("答案")])
+        with self.client.stream(
+            "POST", "/chat/stream", json={"message": "hi"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(
+            frames[:-1],
+            [
+                {"type": "reasoning_delta", "text": "我先想一想"},
+                {"type": "delta", "text": "答案"},
+            ],
+        )
+        self.assertEqual(frames[-1]["type"], "done")
+        messages = server.conversation.messages_for_api()
+        self.assertEqual(
+            [m["content"] for m in messages], ["hi", "答案"]
+        )
 
     def test_llm_error_emits_error_frame_and_rolls_back(self):
         server.llm = FakeErrorLLM(LLMError("上游 500"))
@@ -198,6 +218,57 @@ class AgentStreamTest(unittest.TestCase):
     def test_blank_task_rejected(self):
         resp = self.client.post("/agent/stream", json={"task": "   "})
         self.assertEqual(resp.status_code, 422)
+
+
+class ExportEndpointTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_settings = server.settings
+        server.settings = StubSettings()
+        server.conversation.reset()
+        server.conversation.add("user", "问题")
+        server.conversation.add("assistant", "回答")
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.conversation.reset()
+        server.settings = self._orig_settings
+
+    def test_markdown_export_contains_messages(self):
+        resp = self.client.get("/export")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["content-type"].startswith("text/markdown"))
+        self.assertIn("1. [用户]", resp.text)
+        self.assertIn("问题", resp.text)
+        self.assertIn("2. [助手]", resp.text)
+        self.assertIn("回答", resp.text)
+
+    def test_json_export_returns_history(self):
+        resp = self.client.get("/export?format=json")
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertEqual(payload["default_provider"], "glm")
+        self.assertEqual(
+            payload["messages"],
+            [
+                {"role": "user", "content": "问题"},
+                {"role": "assistant", "content": "回答"},
+            ],
+        )
+
+    def test_unknown_format_rejected(self):
+        resp = self.client.get("/export?format=xml")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("不支持的导出格式", resp.json()["detail"])
+
+
+class HealthEndpointTest(unittest.TestCase):
+    """/health 的 app 标识是 run.bat 判定端口占用者的依据，不能丢。"""
+
+    def test_health_reports_app_identity(self):
+        client = TestClient(server.app)
+        resp = client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "ok", "app": "multiagent"})
 
 
 if __name__ == "__main__":

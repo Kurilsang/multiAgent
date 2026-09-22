@@ -51,6 +51,21 @@
   .msg.assistant .bubble { background: var(--assistant-bubble); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
   .meta { font-size: 11px; color: var(--muted); }
   .msg.error .bubble { background: transparent; border: 1px solid var(--error); color: var(--error); border-radius: 12px; }
+  .bubble.thought {
+    background: transparent; border: 1px dashed var(--border);
+    color: var(--muted); font-size: 12.5px; width: 100%;
+  }
+  .bubble.thought::before {
+    content: "思考"; display: block; font-size: 11px;
+    opacity: 0.75; margin-bottom: 2px;
+  }
+  #toast {
+    position: fixed; bottom: 78px; left: 50%; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--border);
+    padding: 8px 14px; border-radius: 8px; font-size: 13px;
+    opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 10;
+  }
+  #toast.show { opacity: 1; }
   .typing { display: inline-flex; gap: 4px; padding: 12px 16px; }
   .typing span {
     width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
@@ -114,6 +129,7 @@
     <select id="provider-select" title="选择厂商">
       <option value="">默认厂商</option>
     </select>
+    <button id="export-btn" title="导出对话记录为 Markdown（含任务轨迹与错误，可直接粘贴给 AI）">导出</button>
     <button id="clear-btn" title="清空服务端对话上下文并清屏">清空</button>
   </header>
 
@@ -133,9 +149,24 @@ const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 const taskBtn = document.getElementById('task-btn');
 const clearBtn = document.getElementById('clear-btn');
+const exportBtn = document.getElementById('export-btn');
 const providerEl = document.getElementById('provider-select');
 const defaultHintEl = document.getElementById('default-hint');
 let busy = false;
+let toastTimer = null;
+
+function toast(text) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
 
 function scrollToBottom() {
   chatEl.scrollTop = chatEl.scrollHeight;
@@ -234,8 +265,18 @@ async function send() {
     }
     const wrap = addMessage('assistant', '');
     const bubble = wrap.querySelector('.bubble');
+    // 思考流式追加的目标；首个回复增量到达前懒创建，独立成块不混入回答
+    let thoughtEl = null;
     for await (const evt of readSse(res.body)) {
-      if (evt.type === 'delta') {
+      if (evt.type === 'reasoning_delta') {
+        if (!thoughtEl) {
+          thoughtEl = document.createElement('div');
+          thoughtEl.className = 'bubble thought';
+          wrap.insertBefore(thoughtEl, bubble);
+        }
+        thoughtEl.textContent += evt.text;
+        scrollToBottom();
+      } else if (evt.type === 'delta') {
         bubble.textContent += evt.text;
         scrollToBottom();
       } else if (evt.type === 'done') {
@@ -339,9 +380,71 @@ async function clearChat() {
   addMessage('assistant', '已清空对话上下文。');
 }
 
+// 把页面上可见的完整会话（含思考块、任务轨迹、错误提示）组织成 Markdown，
+// 服务端不保存思考链与错误提示，因此以页面为准导出
+function buildExportMarkdown() {
+  const lines = ['# multiagent 对话导出', '', '- 导出时间: ' + new Date().toLocaleString(), '', '---', ''];
+  for (const el of chatEl.children) {
+    if (el.classList.contains('task-card')) {
+      const title = el.querySelector('.task-title');
+      lines.push('## 任务: ' + (title ? title.textContent.replace(/^任务\s*>\s*/, '') : ''));
+      lines.push('');
+      for (const step of el.querySelectorAll('.step')) {
+        const label = step.classList.contains('thought') ? '思考'
+          : step.classList.contains('action') ? '行动'
+          : step.classList.contains('observation') ? (step.classList.contains('error') ? '观察(失败)' : '观察')
+          : step.classList.contains('final') ? '结果' : '失败';
+        lines.push('[' + label + '] ' + step.textContent);
+        lines.push('');
+      }
+      const meta = el.querySelector('.meta');
+      if (meta) { lines.push('(' + meta.textContent + ')'); lines.push(''); }
+    } else if (el.classList.contains('msg')) {
+      if (el.classList.contains('error')) {
+        lines.push('## 错误提示', '', el.querySelector('.bubble').textContent, '');
+      } else if (el.classList.contains('user')) {
+        lines.push('## 用户', '', el.querySelector('.bubble').textContent, '');
+      } else {
+        for (const b of el.querySelectorAll('.bubble')) {
+          if (b.classList.contains('typing')) continue;
+          if (b.classList.contains('thought')) {
+            lines.push('[思考] ' + b.textContent, '');
+          } else {
+            lines.push('## 助手', '', b.textContent, '');
+          }
+        }
+        const meta = el.querySelector('.meta');
+        if (meta) { lines.push('> ' + meta.textContent, ''); }
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+async function exportChat() {
+  const md = buildExportMarkdown();
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'multiagent-export-' + stamp + '.md';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(md);
+    copied = true;
+  } catch (e) { /* 非安全上下文等场景剪贴板不可用 */ }
+  toast(copied ? '已导出 .md 文件，并已复制到剪贴板' : '已导出 .md 文件（剪贴板不可用，请直接粘贴文件内容）');
+}
+
 sendBtn.addEventListener('click', send);
 taskBtn.addEventListener('click', runAgent);
 clearBtn.addEventListener('click', clearChat);
+exportBtn.addEventListener('click', exportChat);
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();

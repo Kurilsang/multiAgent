@@ -9,6 +9,8 @@
 - **Agent 任务**：`/agent` 发起自主多步任务——状态机编排（见 docs/adr/0001）、双层终止（见 docs/adr/0002）、死循环止损、partial 进展摘要
 - **工具 + 技能**：工具走 function calling 通道，技能走上下文通道（占位集：`get_current_time` / `calculator` + 「时间报告」演示技能）
 - **运行时切换**：CLI 中 `/model glm` 随时切换厂商；API 请求中传 `provider` 字段
+- **思考链展示**：`reasoning_content` 字段（GLM / DeepSeek 思考模型）与内联 `<think>` 标签（MiniMax M 系列）统一转写，WebUI / CLI / 任务时间线均实时展示，不污染对话历史
+- **对话导出**：WebUI 一键导出 Markdown（含任务轨迹与错误，可复制剪贴板）、CLI `/export`、HTTP `GET /export`（markdown / json）
 - **全链路流式**：聊天逐 token SSE；Agent 任务思考逐字实时转发、动作/观察按步推送
 - **双入口**：终端 CLI + HTTP API（FastAPI）
 
@@ -36,6 +38,8 @@ python -m app.cli --provider deepseek
 
 Windows 下也可以直接双击 **`run.bat`**：首次运行自动创建虚拟环境、安装依赖并生成 `.env`；随后菜单可选 WebUI（自动开浏览器）、终端对话、运行测试、更新依赖、编辑 `.env`。
 
+启动 WebUI 前会自动做端口预检（端口取自 `.env` 的 `API_PORT`）：若端口已被本服务旧实例占用（通过 `/health` 的 `app` 身份标识确认），自动结束旧进程后重启；若被其他程序占用则拒绝误杀并提示换端口。
+
 ## CLI 命令
 
 | 命令 | 说明 |
@@ -43,6 +47,7 @@ Windows 下也可以直接双击 **`run.bat`**：首次运行自动创建虚拟�
 | `/model` | 查看可用厂商及配置状态 |
 | `/model <name>` | 切换厂商（deepseek / glm / minimax） |
 | `/agent <任务>` | 发起自主多步任务（ReAct 循环，完成后答案回写主对话） |
+| `/export [路径]` | 导出对话记录为 Markdown（缺省写到当前目录，可直接粘贴给 AI 排障） |
 | `/reset` | 清空对话上下文 |
 | `/help` | 帮助 |
 | `/exit` | 退出 |
@@ -63,7 +68,7 @@ curl -X POST http://127.0.0.1:8000/chat \
 curl -N -X POST http://127.0.0.1:8000/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"message": "你好"}'
-# 事件: {"type":"delta","text":"..."} ... {"type":"done","provider":"...","model":"..."}
+# 事件: {"type":"reasoning_delta","text":"..."}(思考链,如有) / {"type":"delta","text":"..."} ... {"type":"done","provider":"...","model":"..."}
 
 # Agent 任务流式（思考逐字转发，动作/观察按步推送，终态带原因）
 curl -N -X POST http://127.0.0.1:8000/agent/stream \
@@ -71,10 +76,14 @@ curl -N -X POST http://127.0.0.1:8000/agent/stream \
   -d '{"task": "现在时间加 3 天是星期几"}'
 # 事件: task_started / thought_delta / action / observation / final | failed
 
+# 导出主对话历史（?format=json 可选，默认 markdown）
+curl http://127.0.0.1:8000/export
+curl "http://127.0.0.1:8000/export?format=json"
+
 # 清空对话上下文
 curl -X POST http://127.0.0.1:8000/reset
 
-# 健康检查 / 厂商状态
+# 健康检查（app 字段为服务身份标识，run.bat 靠它识别端口占用者）/ 厂商状态
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/providers
 ```
@@ -84,21 +93,24 @@ curl http://127.0.0.1:8000/providers
 ```
 app/
 ├── config.py        # .env 加载、厂商注册表、目标解析（支持按厂商覆盖 base_url）
-├── llm.py           # OpenAI SDK 统一封装（流式/非流式、function calling、错误转译）
+├── llm.py           # OpenAI SDK 统一封装（流式/非流式、function calling、思考链转写、错误转译）
 ├── conversation.py  # 主对话历史管理与截断
 ├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、技能通道
 ├── tools.py         # 工具注册表 + 占位工具集（get_current_time / calculator）
-├── cli.py           # 终端入口（/chat 流式 + /agent 任务）
-├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream）
+├── export.py        # 对话导出格式化（markdown / json 纯函数）
+├── cli.py           # 终端入口（/chat 流式 + /agent 任务 + /export 导出）
+├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/export）
 └── static/
-    └── index.html   # WebUI（聊天流式 + 任务时间线，无框架，单文件）
+    └── index.html   # WebUI（聊天流式 + 思考块 + 任务时间线 + 导出，无框架，单文件）
 tests/
 ├── fakes.py             # 脚本化 LLM fake（预约定测试缝隙）
 ├── test_config.py
 ├── test_conversation.py
 ├── test_tools.py
 ├── test_llm_tools.py
+├── test_llm_thinking.py
 ├── test_agent.py
+├── test_export.py
 └── test_server_stream.py
 ```
 

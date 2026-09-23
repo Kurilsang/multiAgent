@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     # Agent 任务最大思考轮数（引擎侧硬上限，超过则以 partial 终态收尾）
     agent_max_iterations: int = Field(default=8, ge=1)
 
+    # 技能包目录（相对项目根）；清单注入条数上限（超出走 search_skills）
+    skills_dir: str = "skills"
+    skills_catalog_max: int = Field(default=30, ge=1)
+
+    # 聊天通道迷你工具循环上限（技能激活与依赖工具调用的轮数）
+    chat_max_tool_turns: int = Field(default=4, ge=1)
+
     api_host: str = "127.0.0.1"
     api_port: int = 8000
 

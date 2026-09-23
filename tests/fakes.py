@@ -131,11 +131,12 @@ class FakeHttpClient:
 
 
 class FakeResponse:
-    """最小 HTTP 响应替身（适配器只读 status_code / text）。"""
+    """最小 HTTP 响应替身（适配器读 status_code / text / content）。"""
 
-    def __init__(self, text="", status_code=200):
+    def __init__(self, text="", status_code=200, content=None):
         self.text = text
         self.status_code = status_code
+        self.content = content if content is not None else text.encode()
 
 
 class FakeCatalogSource:

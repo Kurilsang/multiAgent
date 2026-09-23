@@ -20,11 +20,22 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
 import json
 import time
 import uuid
+import zipfile
+from pathlib import PurePosixPath
+from urllib.parse import quote
 
-from ..schema import AuditBadge, CatalogEntry, CatalogError, SkillDetail, SkillPack
+from ..schema import (
+    AuditBadge,
+    CatalogEntry,
+    CatalogError,
+    SkillDetail,
+    SkillPack,
+    peek_skill_meta,
+)
 
 BASE_URL = "https://market.lobehub.com"
 PAGE_TIMEOUT = 20.0
@@ -165,10 +176,33 @@ class LobeHubSource:
         return entries
 
     def detail(self, ref: str) -> SkillDetail:
-        raise CatalogError("LobeHub 详情预览随目录包获取落地（20 号工单）", 501)
+        """确认卡预览：从 ZIP 包取 SKILL.md 全文（审计以列表条目的 isValidated 为准）。"""
+        pack = self.fetch_pack(ref)
+        skill_md = next(text for path, text in pack.files if path.endswith("SKILL.md"))
+        meta = peek_skill_meta(skill_md)
+        entry = CatalogEntry.from_raw(
+            {
+                "id": ref,
+                "name": meta["name"] or ref,
+                "description": meta["description"],
+                "origin": pack.origin or ref,
+                "detail_url": f"{BASE_URL}/skills/{ref}",
+                "install_ref": ref,
+            },
+            source="lobehub",
+        )
+        return SkillDetail(entry=entry, skill_md=skill_md)
 
     def fetch_pack(self, ref: str) -> SkillPack:
-        raise CatalogError("LobeHub 目录包获取随 20 号工单落地", 501)
+        """目录包获取：下载 ZIP 并解包为 SKILL.md 文件集（防 zip-slip）。"""
+        response = self._request(
+            "GET",
+            f"{BASE_URL}/api/v1/skills/{quote(ref, safe='')}/download",
+            headers={"Authorization": f"Bearer {self._access_token()}"},
+        )
+        if response.status_code != 200:
+            raise CatalogError(f"LobeHub 包下载失败（HTTP {response.status_code}）", 502)
+        return _zip_to_pack(response.content, origin=ref)
 
     # ---- 传输 ----
 
@@ -197,3 +231,46 @@ def _default_client():
     import httpx
 
     return httpx.Client(follow_redirects=True)
+
+
+def _zip_to_pack(blob: bytes, origin: str) -> SkillPack:
+    """ZIP → 目录包：zip-slip 防护（绝对路径与 .. 一律拒绝）+ 顶层目录归一。"""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile as exc:
+        raise CatalogError("LobeHub 包不是有效 ZIP（下载可能被截断）", 502) from exc
+    entries: list[tuple[str, PurePosixPath]] = []
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        path = PurePosixPath(info.filename)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            raise CatalogError(f"LobeHub 包含非法路径（zip-slip 防护拒绝）：{info.filename}", 502)
+        entries.append((info.filename, path))
+    files: list[tuple[str, str]] = []
+    extras: list[str] = []
+    for filename, path in _strip_root(entries):
+        if path.name == "SKILL.md":
+            files.append(
+                (str(path), archive.read(filename).decode("utf-8", errors="replace"))
+            )
+        else:
+            extras.append(str(path))
+    if not files:
+        raise CatalogError("LobeHub 包内未找到 SKILL.md", 502)
+    return SkillPack(
+        files=tuple(files), extra_files=tuple(extras), origin=origin, source="lobehub"
+    )
+
+
+def _strip_root(entries: list[tuple[str, PurePosixPath]]) -> list[tuple[str, PurePosixPath]]:
+    """所有文件同属单个顶层目录时剥掉它（包路径归一到技能根）。"""
+    paths = [path for _filename, path in entries]
+    if paths and all(len(path.parts) > 1 for path in paths):
+        roots = {path.parts[0] for path in paths}
+        if len(roots) == 1:
+            return [
+                (filename, PurePosixPath(*path.parts[1:]))
+                for filename, path in entries
+            ]
+    return entries

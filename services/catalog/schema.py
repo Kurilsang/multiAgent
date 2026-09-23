@@ -39,6 +39,28 @@ def clean_text(value, limit: int) -> str:
     return text[:limit]
 
 
+_FM_NAME_RE = re.compile(r"^name:\s*(.+)$", re.M)
+_FM_DESC_RE = re.compile(r"^description:\s*(.+)$", re.M)
+
+
+def peek_skill_meta(skill_md: str) -> dict:
+    """从 SKILL.md frontmatter 宽松取 name/description（详情预览用）。"""
+    text = skill_md or ""
+    head = ""
+    if text.lstrip().startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            head = parts[1]
+    name = _FM_NAME_RE.search(head)
+    description = _FM_DESC_RE.search(head)
+    return {
+        "name": clean_text(name.group(1), MAX_NAME_CHARS) if name else "",
+        "description": (
+            clean_text(description.group(1), MAX_DESCRIPTION_CHARS) if description else ""
+        ),
+    }
+
+
 def _clean_tags(raw) -> tuple[str, ...]:
     tags = []
     for item in list(raw or ())[:MAX_TAGS]:

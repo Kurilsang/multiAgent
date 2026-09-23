@@ -5,7 +5,9 @@
 """
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,8 @@ from app.agent import (
     ThoughtDelta,
 )
 from app.llm import LLMError, ReasoningDelta, TextDelta
+
+from tests.fakes import FakeLLMClient, text_round, tool_round
 
 
 class FakeStreamLLM:
@@ -221,6 +225,106 @@ class AgentStreamTest(unittest.TestCase):
     def test_blank_task_rejected(self):
         resp = self.client.post("/agent/stream", json={"task": "   "})
         self.assertEqual(resp.status_code, 422)
+
+
+class WiringSwapMixin:
+    """把整套技能装配换到临时目录（测试间互不污染，可安全热重载）。"""
+
+    def setUp(self):
+        self._orig = (
+            server.llm,
+            server.settings,
+            server.tool_registry,
+            server.skill_registry,
+            server.skill_load_errors,
+            server.agent_engine,
+        )
+        server.settings = StubSettings()
+        server.conversation.reset()
+        self._tmp = tempfile.TemporaryDirectory()
+        server.llm = FakeLLMClient([])
+        (
+            server.tool_registry,
+            server.skill_registry,
+            server.skill_load_errors,
+            server.agent_engine,
+        ) = server._build_wiring(Path(self._tmp.name))
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.conversation.reset()
+        (
+            server.llm,
+            server.settings,
+            server.tool_registry,
+            server.skill_registry,
+            server.skill_load_errors,
+            server.agent_engine,
+        ) = self._orig
+        self._tmp.cleanup()
+
+    def _parse_frames(self, response) -> list[dict]:
+        frames = []
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                frames.append(json.loads(line[len("data: ") :]))
+        return frames
+
+
+class ChatSkillLoopTest(WiringSwapMixin, unittest.TestCase):
+    """聊天迷你工具循环：技能自主激活、工具闸门、轮数上限。"""
+
+    def test_use_skill_activates_dependency_tools_within_turn(self):
+        server.skill_registry.create("时间报告", "日期推算", "先取时间，再换算", ("calculator",))
+        fake = FakeLLMClient(
+            [tool_round("use_skill", {"name": "时间报告"}), text_round("答案是周三")]
+        )
+        server.llm = fake
+        with self.client.stream(
+            "POST", "/chat/stream", json={"message": "3 天后是几号"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(
+            [f["type"] for f in frames], ["action", "observation", "delta", "done"]
+        )
+        self.assertEqual(frames[0]["tool"], "use_skill")
+        self.assertIn("先取时间", frames[1]["text"])
+        # 第二轮把激活技能声明的 calculator 加入了工具集
+        second_tools = {t["function"]["name"] for t in fake.calls[1][1]}
+        self.assertIn("calculator", second_tools)
+        # 仅最终文本入主对话，技能正文与工具中间态不落历史
+        self.assertEqual(
+            [m["content"] for m in server.conversation.messages_for_api()],
+            ["3 天后是几号", "答案是周三"],
+        )
+
+    def test_unactivated_dependency_tool_rejected(self):
+        server.skill_registry.create("时间报告", "日期推算", "先取时间", ("calculator",))
+        fake = FakeLLMClient(
+            [tool_round("calculator", {"expression": "1+1"}), text_round("好吧")]
+        )
+        server.llm = fake
+        with self.client.stream(
+            "POST", "/chat/stream", json={"message": "算一下"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertTrue(frames[1]["is_error"])
+        self.assertIn("未激活", frames[1]["text"])
+        second_tools = {t["function"]["name"] for t in fake.calls[1][1]}
+        self.assertNotIn("calculator", second_tools)
+
+    def test_turn_limit_ends_with_error_frame_and_rolls_back(self):
+        server.skill_registry.create("时间报告", "日期推算", "先取时间")
+        rounds = [
+            tool_round("use_skill", {"name": "时间报告"})
+            for _ in range(StubSettings.chat_max_tool_turns)
+        ]
+        server.llm = FakeLLMClient(rounds)
+        with self.client.stream("POST", "/chat/stream", json={"message": "嗨"}) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(frames[-1]["type"], "error")
+        self.assertIn("上限", frames[-1]["detail"])
+        self.assertEqual(len(server.conversation), 0)
 
 
 class ExportEndpointTest(unittest.TestCase):

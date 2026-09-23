@@ -107,6 +107,37 @@ def make_catalog_entries(count: int, source: str = "fake", prefix: str = "skill"
     ]
 
 
+class FakeHttpClient:
+    """脚本化 HTTP 客户端：按 URL 子串路由响应/异常（先匹配先生效），记录请求。"""
+
+    def __init__(self, routes=None):
+        self.routes = list((routes or {}).items())
+        self.calls: list[tuple] = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        for needle, result in self.routes:
+            if needle in url:
+                if isinstance(result, Exception):
+                    raise result
+                return result
+        return FakeResponse("", 404)
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+
+class FakeResponse:
+    """最小 HTTP 响应替身（适配器只读 status_code / text）。"""
+
+    def __init__(self, text="", status_code=200):
+        self.text = text
+        self.status_code = status_code
+
+
 class FakeCatalogSource:
     """脚本化的目录源：crawl/detail/fetch_pack 可预设结果或错误。"""
 

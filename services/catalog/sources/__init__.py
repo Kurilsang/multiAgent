@@ -32,9 +32,17 @@ class CatalogSource(Protocol):
 
 
 def build_sources(settings) -> dict[str, CatalogSource]:
-    """按配置装配启用的源。
+    """按配置装配启用的源（适配器差异在此归一为统一合同）。"""
+    from .lobehub import LobeHubSource
+    from .skills_sh import SkillsShSource
 
-    适配器注册表：18/20 号工单接入真实源（skills-sh / lobehub）后在此注册；
-    当前返回空集（目录浏览需至少一个源，见 /internal/sources 的空态）。
-    """
-    return {}
+    registry = {
+        SkillsShSource.name: SkillsShSource,
+        LobeHubSource.name: LobeHubSource,
+    }
+    sources: dict[str, CatalogSource] = {}
+    for name in settings.sources:
+        factory = registry.get(name)
+        if factory is not None:
+            sources[name] = factory(settings)
+    return sources

@@ -14,6 +14,11 @@
                           action/observation 技能步骤帧）；消息以 /技能名 开头时
                           显式点名技能，确定性升级为任务通道（预激活）
     POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
+    GET  /skills          已装技能列表（元数据 + 启停状态 + 启动加载错误）
+    GET  /skills/{name}   技能详情（含 SKILL.md 原文）
+    POST /skills/{name}/enable     启用技能
+    POST /skills/{name}/disable    禁用技能
+    DELETE /skills/{name}          删除技能包
     GET  /export          导出主对话历史，?format=markdown(默认)|json
     POST /reset           清空对话上下文
 """
@@ -42,7 +47,7 @@ from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_targ
 from .conversation import Conversation
 from .export import to_json, to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
-from .skills import SkillRegistry, catalog_section, resolve_skills_dir
+from .skills import SkillEntry, SkillError, SkillRegistry, catalog_section, resolve_skills_dir
 from .tools import SKILL_TOOL_NAMES, default_registry, skill_tools
 
 settings = Settings()
@@ -433,6 +438,68 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+# ---- 技能管理面 ----
+
+
+def _entry_json(entry: SkillEntry) -> dict:
+    return {
+        "name": entry.skill.name,
+        "description": entry.skill.description,
+        "tools": list(entry.skill.tools),
+        "enabled": entry.enabled,
+        "source": entry.source,
+    }
+
+
+@app.get("/skills")
+def list_skills() -> dict:
+    return {
+        "skills": [_entry_json(entry) for entry in skill_registry.entries()],
+        "load_errors": skill_load_errors,
+    }
+
+
+@app.get("/skills/{name}")
+def get_skill(name: str) -> dict:
+    entry = skill_registry.get(name)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"未找到技能: {name}")
+    try:
+        content = skill_registry.pack_file(name).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"技能文件读取失败: {exc}") from exc
+    return {**_entry_json(entry), "content": content}
+
+
+def _set_enabled(name: str, enabled: bool) -> dict:
+    with _chat_lock:
+        try:
+            entry = skill_registry.set_enabled(name, enabled)
+        except SkillError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok", "skill": _entry_json(entry)}
+
+
+@app.post("/skills/{name}/enable")
+def enable_skill(name: str) -> dict:
+    return _set_enabled(name, True)
+
+
+@app.post("/skills/{name}/disable")
+def disable_skill(name: str) -> dict:
+    return _set_enabled(name, False)
+
+
+@app.delete("/skills/{name}")
+def delete_skill(name: str) -> dict:
+    with _chat_lock:
+        try:
+            skill_registry.remove(name)
+        except SkillError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":

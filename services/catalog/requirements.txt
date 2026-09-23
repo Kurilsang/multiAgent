@@ -1,0 +1,4 @@
+# 技能在线目录爬取服务（独立进程依赖，不回流主工程 requirements.txt）
+fastapi
+uvicorn
+httpx

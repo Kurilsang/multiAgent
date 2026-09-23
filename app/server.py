@@ -11,7 +11,8 @@
     GET  /providers       列出厂商及配置状态
     POST /chat            发送一条消息 {"message": "...", "provider": "glm"(可选), "model": "..."(可选)}
     POST /chat/stream     同 /chat，逐 token SSE 流式推送（含 reasoning_delta 思考帧、
-                          action/observation 技能步骤帧）
+                          action/observation 技能步骤帧）；消息以 /技能名 开头时
+                          显式点名技能，确定性升级为任务通道（预激活）
     POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
     GET  /export          导出主对话历史，?format=markdown(默认)|json
     POST /reset           清空对话上下文
@@ -332,8 +333,8 @@ def _safe_args(arguments_json: str) -> dict:
 def chat_stream(req: ChatRequest) -> StreamingResponse:
     """逐 token SSE 聊天；行为与 /chat 一致，改为流式推送。
 
-    走聊天迷你工具循环：模型可按清单自主 use_skill 激活技能，
-    激活后本轮可用其依赖工具（action/observation 帧展示步骤）。
+    消息以 /技能名 开头且命中已启用技能时，确定性路由到任务通道并
+    预激活该技能（帧型为任务事件流）；其余消息走聊天迷你工具循环。
     非 200 的配置错误在开流之前抛出，开流之后的上游错误以 error 帧推送。
     """
     try:
@@ -341,6 +342,13 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    entry = skill_registry.match_prefix(req.message)
+    if entry is not None:
+        return StreamingResponse(
+            _agent_frames(req.message, req.provider, req.model, activated=(entry.skill,)),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
     return StreamingResponse(
         _chat_frames(req, target),
         media_type="text/event-stream",
@@ -388,33 +396,40 @@ def _agent_event_frame(event) -> dict:
     raise RuntimeError(f"未知的引擎事件类型: {type(event).__name__}")
 
 
-@app.post("/agent/stream")
-def agent_stream(req: AgentRequest) -> StreamingResponse:
+def _agent_frames(
+    task: str,
+    provider: str | None,
+    model: str | None,
+    activated: tuple = (),
+) -> Iterator[str]:
     """Agent 任务 SSE：思考逐字实时转发，动作/观察按步推送，终态带原因。
 
-    非 200 的配置错误在开流之前抛出；引擎自身会把上游错误编码为
-    failed 帧，因此流内不会抛出异常。
+    completed / partial 回写「请求 + 最终答案」到主对话；
+    activated 为 /技能名 显式点名的预激活技能。
+    """
+    with _chat_lock:
+        answer: str | None = None
+        for event in agent_engine.run(task, provider, model, activated=activated):
+            yield _sse(_agent_event_frame(event))
+            if isinstance(event, TaskFinished):
+                answer = event.answer
+        if answer is not None:
+            conversation.add("user", task)
+            conversation.add("assistant", answer)
+
+
+@app.post("/agent/stream")
+def agent_stream(req: AgentRequest) -> StreamingResponse:
+    """Agent 任务 SSE 流。非 200 的配置错误在开流之前抛出；
+    引擎自身会把上游错误编码为 failed 帧，因此流内不会抛出异常。
     """
     try:
         resolve_target(settings, req.provider, req.model)
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def generate():
-        # 与聊天共用同一把锁：任务回写主对话时互斥
-        with _chat_lock:
-            answer: str | None = None
-            for event in agent_engine.run(req.task, req.provider, req.model):
-                yield _sse(_agent_event_frame(event))
-                if isinstance(event, TaskFinished):
-                    answer = event.answer
-            if answer is not None:
-                # 与 CLI 路径一致：completed / partial 回写「请求 + 最终答案」
-                conversation.add("user", req.task)
-                conversation.add("assistant", answer)
-
     return StreamingResponse(
-        generate(),
+        _agent_frames(req.task, req.provider, req.model),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )

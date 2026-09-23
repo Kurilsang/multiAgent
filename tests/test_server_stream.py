@@ -327,6 +327,47 @@ class ChatSkillLoopTest(WiringSwapMixin, unittest.TestCase):
         self.assertEqual(len(server.conversation), 0)
 
 
+class SkillPrefixRoutingTest(WiringSwapMixin, unittest.TestCase):
+    """/技能名 显式点名：确定性路由任务通道并预激活。"""
+
+    def test_prefix_routes_to_agent_with_activated_skill(self):
+        server.skill_registry.create("时间报告", "日期推算", "先取时间")
+        fake_engine = FakeAgentEngine(
+            [
+                TaskStarted(task="/时间报告 3 天后是几号"),
+                TaskFinished(status="completed", answer="周三", iterations=1),
+            ]
+        )
+        server.agent_engine = fake_engine
+        with self.client.stream(
+            "POST", "/chat/stream", json={"message": "/时间报告 3 天后是几号"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual([f["type"] for f in frames], ["task_started", "final"])
+        task, _provider, _model, activated = fake_engine.calls[0]
+        self.assertEqual(task, "/时间报告 3 天后是几号")
+        self.assertEqual(activated[0].name, "时间报告")
+        self.assertEqual(len(server.conversation), 2)
+
+    def test_unknown_prefix_falls_back_to_chat(self):
+        server.llm = FakeStreamLLM([TextDelta("你好")])
+        with self.client.stream(
+            "POST", "/chat/stream", json={"message": "/nope 嗨"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(frames[0]["type"], "delta")
+
+    def test_disabled_skill_prefix_falls_back_to_chat(self):
+        server.skill_registry.create("时间报告", "日期推算", "先取时间")
+        server.skill_registry.disable("时间报告")
+        server.llm = FakeStreamLLM([TextDelta("你好")])
+        with self.client.stream(
+            "POST", "/chat/stream", json={"message": "/时间报告 3 天后"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(frames[0]["type"], "delta")
+
+
 class ExportEndpointTest(unittest.TestCase):
     def setUp(self):
         self._orig_settings = server.settings

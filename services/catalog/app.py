@@ -9,32 +9,11 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
 
-from .schema import CatalogError, CatalogEntry
+from .refresher import refresh_now
+from .schema import CatalogError
 from .store import CatalogStore
 
 MAX_PAGE_SIZE = 100
-
-
-def _refresh(sources: dict, store: CatalogStore, names: list[str]) -> list[dict]:
-    """一次爬取：逐源拉目录入库；单源失败只记错不毁全局（降级读缓存）。"""
-    from datetime import datetime, timezone
-
-    results: list[dict] = []
-    for name in names:
-        source = sources.get(name)
-        if source is None:
-            results.append({"source": name, "status": "unknown_source", "detail": f"未配置的源: {name}"})
-            continue
-        try:
-            entries = source.crawl()
-        except Exception as exc:  # 爬取失败属于常态：记录并继续其他源
-            store.record_error(name, str(exc))
-            results.append({"source": name, "status": "error", "detail": str(exc)})
-            continue
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        store.replace_source(name, list(entries), now)
-        results.append({"source": name, "status": "ok", "count": len(entries)})
-    return results
 
 
 def create_app(sources: dict, store: CatalogStore) -> FastAPI:
@@ -96,8 +75,8 @@ def create_app(sources: dict, store: CatalogStore) -> FastAPI:
     @app.post("/internal/refresh")
     def refresh(payload: dict | None = None) -> dict:
         requested = (payload or {}).get("source") or ""
-        names = [requested] if requested else sorted(sources)
-        return {"results": _refresh(sources, store, names)}
+        names = [requested] if requested else None
+        return {"results": refresh_now(sources, store, names)}
 
     return app
 

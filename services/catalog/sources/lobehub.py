@@ -91,9 +91,7 @@ class LobeHubSource:
         self._client = client
         self._creds = creds_store if creds_store is not None else {}
         self._token: str | None = None
-        self._token_expiry: float = 0.0
-
-    # ---- 鉴权 ----
+        self._token_expiry: float = 0.0    # ---- 鉴权 ----
 
     def register(self, client_name: str = CLIENT_NAME) -> dict:
         """注册 M2M 客户端（限 5 次/30 分钟/IP）；返回凭证，由调用方存凭证仓。"""

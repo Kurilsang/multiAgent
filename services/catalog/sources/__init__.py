@@ -31,8 +31,12 @@ class CatalogSource(Protocol):
         ...
 
 
-def build_sources(settings) -> dict[str, CatalogSource]:
-    """按配置装配启用的源（适配器差异在此归一为统一合同）。"""
+def build_sources(settings, creds_factory=None) -> dict[str, CatalogSource]:
+    """按配置装配启用的源（适配器差异在此归一为统一合同）。
+
+    creds_factory：源名 → 凭证仓（dict 风格 get/update）；SQLite 持久仓由
+    __main__ 注入，测试注入 dict 即可。
+    """
     from .lobehub import LobeHubSource
     from .skills_sh import SkillsShSource
 
@@ -44,5 +48,6 @@ def build_sources(settings) -> dict[str, CatalogSource]:
     for name in settings.sources:
         factory = registry.get(name)
         if factory is not None:
-            sources[name] = factory(settings)
+            creds = creds_factory(name) if creds_factory is not None else None
+            sources[name] = factory(settings, creds_store=creds)
     return sources

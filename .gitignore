@@ -8,6 +8,9 @@ __pycache__/
 .venv/
 venv/
 
+# 技能在线目录爬取服务的本地缓存库（含平台凭证，不入库）
+services/catalog/catalog.db
+
 # Tooling
 .pytest_cache/
 .mypy_cache/

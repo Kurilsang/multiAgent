@@ -81,7 +81,8 @@ class SkillsShSource:
 
     name = "skills-sh"
 
-    def __init__(self, settings=None, client=None):
+    def __init__(self, settings=None, client=None, creds_store=None):
+        # creds_store：接口统一占位（本源匿名 HTML 抓取，无凭证）
         self._client = client
 
     def crawl(self, max_pages: int = 3) -> list[CatalogEntry]:

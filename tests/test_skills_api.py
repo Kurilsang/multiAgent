@@ -78,6 +78,48 @@ class SkillsApiTest(unittest.TestCase):
         self.assertEqual(self.client.get("/skills").json()["skills"], [])
         self.assertEqual(self.client.delete("/skills/时间报告").status_code, 404)
 
+    def test_install_from_local_dir(self):
+        source = self.root / "repo"
+        pack = source / "技能甲"
+        pack.mkdir(parents=True)
+        (pack / "SKILL.md").write_text(
+            "---\nname: 技能甲\ndescription: d1\ntools: []\n---\n\n正文甲\n",
+            encoding="utf-8",
+        )
+        resp = self.client.post("/skills/install", json={"source": "local", "path": str(source)})
+        self.assertEqual(resp.status_code, 200)
+        report = resp.json()
+        self.assertEqual(report["results"][0]["status"], "installed")
+        self.assertTrue(report["source"].startswith("local:"))
+
+        names = [s["name"] for s in self.client.get("/skills").json()["skills"]]
+        self.assertIn("技能甲", names)
+
+    def test_install_bad_requests(self):
+        resp = self.client.post("/skills/install", json={"source": "ftp"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("不支持的安装来源", resp.json()["detail"])
+
+        resp = self.client.post("/skills/install", json={"source": "local"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("缺少本地目录路径", resp.json()["detail"])
+
+        resp = self.client.post(
+            "/skills/install", json={"source": "local", "path": str(self.root / "nope")}
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("本地目录不存在", resp.json()["detail"])
+
+        resp = self.client.post("/skills/install", json={"source": "git", "url": ""})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("缺少 Git 仓库地址", resp.json()["detail"])
+
+    def test_presets_endpoint(self):
+        resp = self.client.get("/skills/presets")
+        self.assertEqual(resp.status_code, 200)
+        names = [p["name"] for p in resp.json()["presets"]]
+        self.assertIn("anthropics/skills", names)
+
 
 if __name__ == "__main__":
     unittest.main()

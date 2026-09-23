@@ -15,10 +15,12 @@
                           显式点名技能，确定性升级为任务通道（预激活）
     POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
     GET  /skills          已装技能列表（元数据 + 启停状态 + 启动加载错误）
+    GET  /skills/presets  预设平台源清单（一键安装用）
     GET  /skills/{name}   技能详情（含 SKILL.md 原文）
     POST /skills/{name}/enable     启用技能
     POST /skills/{name}/disable    禁用技能
     DELETE /skills/{name}          删除技能包
+    POST /skills/install  安装 {"source": "git"|"local", "url"|"path": "...", "subpath": "..."}
     GET  /export          导出主对话历史，?format=markdown(默认)|json
     POST /reset           清空对话上下文
 """
@@ -47,7 +49,16 @@ from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_targ
 from .conversation import Conversation
 from .export import to_json, to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
-from .skills import SkillEntry, SkillError, SkillRegistry, catalog_section, resolve_skills_dir
+from .skills import (
+    PRESET_SOURCES,
+    SkillEntry,
+    SkillError,
+    SkillRegistry,
+    catalog_section,
+    install_from_dir,
+    install_from_git,
+    resolve_skills_dir,
+)
 from .tools import SKILL_TOOL_NAMES, default_registry, skill_tools
 
 settings = Settings()
@@ -461,6 +472,11 @@ def list_skills() -> dict:
     }
 
 
+@app.get("/skills/presets")
+def skills_presets() -> dict:
+    return {"presets": [dict(preset) for preset in PRESET_SOURCES]}
+
+
 @app.get("/skills/{name}")
 def get_skill(name: str) -> dict:
     entry = skill_registry.get(name)
@@ -500,6 +516,32 @@ def delete_skill(name: str) -> dict:
         except SkillError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "ok"}
+
+
+class InstallRequest(BaseModel):
+    source: str  # git | local（在处理函数中校验，给出中文错误）
+    url: str = ""
+    path: str = ""
+    subpath: str = ""
+
+
+@app.post("/skills/install")
+def install_skill(req: InstallRequest) -> dict:
+    """安装技能：Git 适配器（通用，覆盖全部 SKILL.md 生态）或本地目录导入。"""
+    source = req.source.strip().lower()
+    with _chat_lock:
+        try:
+            if source == "git":
+                return install_from_git(skill_registry, req.url, req.subpath.strip())
+            if source == "local":
+                if not req.path.strip():
+                    raise SkillError("缺少本地目录路径")
+                return install_from_dir(skill_registry, req.path.strip(), req.subpath.strip())
+        except SkillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    raise HTTPException(
+        status_code=400, detail=f"不支持的安装来源: {req.source!r}，可选 git / local"
+    )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""技能注册表：SKILL.md 技能包的加载、校验与自产。
+"""技能注册表：SKILL.md 技能包的加载、校验、自产与安装。
 
 技能是提示词形式注入上下文的能力包（见 CONTEXT.md「技能」「技能包」），
 文件态是唯一事实源：`skills/<名称>/SKILL.md` = YAML frontmatter + Markdown 正文。
@@ -6,6 +6,9 @@ frontmatter 仅允许 name / description / tools 三个平面字段，超出一�
 技能包可能来自第三方安装，格式校验是信任边界的第一道闸。
 
 启停状态另存 `skills/.installed.json`（不碰技能包本身）；增删改后热重载。
+安装器（本地导入 / Git 适配器）也在这里：主流平台（anthropics/skills、
+skills.sh 收录仓库等）的技能包都是「Git 仓库里的 SKILL.md 目录」，克隆后
+扫描 `**/SKILL.md` 即完成安装。
 """
 
 from __future__ import annotations
@@ -29,6 +32,17 @@ MAX_GUIDE_CHARS = 8000
 PACK_FILENAME = "SKILL.md"
 STATE_FILENAME = ".installed.json"
 ALLOWED_FIELDS = ("name", "description", "tools")
+
+# 预设源：只收真实可安装的 SKILL.md 仓库；更多平台（skills.sh / ClawHub /
+# LobeHub）上的技能本质是 Git 仓库里的 SKILL.md，粘贴 Git URL 即可安装
+PRESET_SOURCES: tuple[dict, ...] = (
+    {
+        "name": "anthropics/skills",
+        "url": "https://github.com/anthropics/skills",
+        "subpath": "",
+        "note": "Anthropic 官方 Agent Skills 库（SKILL.md 生态源头）",
+    },
+)
 
 
 class SkillError(Exception):
@@ -392,3 +406,72 @@ class SkillRegistry:
         self._state_file.write_text(
             json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+
+# ---- 安装器：本地目录 / Git 适配器 ----
+
+
+def _scan_packs(root: Path) -> list[dict]:
+    """扫描目录下全部 SKILL.md，解析成安装候选（解析失败进结果）。"""
+    packs: list[dict] = []
+    for pack_file in sorted(root.rglob(PACK_FILENAME)):
+        try:
+            fields, body = parse_skill_md(pack_file.read_text(encoding="utf-8"))
+        except (OSError, SkillError) as exc:
+            packs.append({"name": pack_file.parent.name, "error": str(exc)})
+            continue
+        packs.append(
+            {
+                "name": fields["name"] or pack_file.parent.name,
+                "description": fields["description"],
+                "guide": body,
+                "tools": tuple(str(item) for item in fields["tools"]),
+            }
+        )
+    return packs
+
+
+def install_from_dir(
+    registry: SkillRegistry, path: str, subpath: str = "", source: str | None = None
+) -> dict:
+    """本地目录导入：扫描 SKILL.md 并批量落盘。"""
+    root = Path(path)
+    if subpath:
+        root = root / subpath
+    if not root.is_dir():
+        raise SkillError(f"本地目录不存在: {root}")
+    packs = _scan_packs(root)
+    if not packs:
+        raise SkillError(f"目录 {root} 下未找到任何 {PACK_FILENAME} 技能包")
+    return {
+        "source": source or f"local:{path}",
+        "results": registry.install_packs(packs, source or f"local:{path}"),
+    }
+
+
+def install_from_git(
+    registry: SkillRegistry, url: str, subpath: str = "", timeout: int = 60
+) -> dict:
+    """通用 Git 适配器：克隆后扫描 SKILL.md 安装（覆盖全部 SKILL.md 生态）。"""
+    url = url.strip()
+    if not url:
+        raise SkillError("缺少 Git 仓库地址")
+    with tempfile.TemporaryDirectory(prefix="skill-install-") as tmp:
+        target = Path(tmp) / "repo"
+        try:
+            proc = subprocess.run(
+                ["git", "clone", "--depth", "1", url, str(target)],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise SkillError("未安装 git 命令，无法从仓库安装") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise SkillError(f"git 克隆超时（{timeout}s）: {url}") from exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            raise SkillError(
+                f"git 克隆失败: {detail[-1] if detail else url}"
+            )
+        return install_from_dir(registry, str(target), subpath, source=f"git:{url}")

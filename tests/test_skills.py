@@ -4,6 +4,8 @@
 git 适配器用本地仓库（离线克隆），仅在装有 git 时执行。
 """
 
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,8 @@ from app.skills import (
     SkillError,
     SkillRegistry,
     catalog_section,
+    install_from_dir,
+    install_from_git,
     parse_skill_md,
     render_skill_md,
 )
@@ -240,6 +244,83 @@ class CatalogSectionTest(unittest.TestCase):
         self.assertIn("skill-a", section)
         self.assertNotIn("skill-b", section)
         self.assertIn("search_skills", section)
+
+
+class InstallTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.registry = make_registry(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_install_from_dir_reports_each_pack(self):
+        source = self.root / "repo"
+        write_pack(self.root / "repo", "技能甲", VALID_PACK.replace("时间报告", "技能甲").replace("description: 日期推算", "description: d1"))
+        write_pack(self.root / "repo", "sub/技能乙", VALID_PACK.replace("时间报告", "技能乙").replace("description: 日期推算", "description: d2"))
+        write_pack(self.root / "repo", "坏技能", VALID_PACK.replace("时间报告", "坏技能").replace("calculator", "missing_tool").replace("description: 日期推算", "description: d3"))
+        report = install_from_dir(self.registry, str(source))
+        statuses = {item["name"]: item["status"] for item in report["results"]}
+        self.assertEqual(statuses["技能甲"], "installed")
+        self.assertEqual(statuses["技能乙"], "installed")
+        self.assertEqual(statuses["坏技能"], "invalid")
+        self.assertIsNotNone(self.registry.get("技能甲"))
+        self.assertTrue(report["source"].startswith("local:"))
+
+        # 重装：同名跳过
+        report = install_from_dir(self.registry, str(source))
+        statuses = {item["name"]: item["status"] for item in report["results"]}
+        self.assertEqual(statuses["技能甲"], "skipped")
+
+    def test_install_missing_or_empty_dir(self):
+        with self.assertRaises(SkillError):
+            install_from_dir(self.registry, str(self.root / "nope"))
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self.assertRaises(SkillError) as ctx:
+            install_from_dir(self.registry, str(empty))
+        self.assertIn("未找到任何", str(ctx.exception))
+
+    def test_scan_parse_error_reported(self):
+        write_pack(self.root / "repo", "坏包", "不是 SKILL.md 格式")
+        report = install_from_dir(self.registry, str(self.root / "repo"))
+        self.assertEqual(report["results"][0]["status"], "invalid")
+        self.assertIn("frontmatter", report["results"][0]["detail"])
+
+
+@unittest.skipUnless(shutil.which("git"), "需要 git 命令")
+class GitInstallTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.registry = make_registry(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _make_repo(self) -> str:
+        repo = self.root / "repo"
+        write_pack(self.root / "repo", "技能甲", VALID_PACK.replace("时间报告", "技能甲"))
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+            check=True,
+            capture_output=True,
+        )
+        return str(repo)
+
+    def test_install_from_local_git_repo(self):
+        report = install_from_git(self.registry, self._make_repo())
+        self.assertEqual(report["results"][0]["status"], "installed")
+        self.assertTrue(report["source"].startswith("git:"))
+        self.assertIsNotNone(self.registry.get("技能甲"))
+
+    def test_clone_failure_reports_chinese_error(self):
+        with self.assertRaises(SkillError) as ctx:
+            install_from_git(self.registry, str(self.root / "no-such-repo"))
+        self.assertIn("git 克隆失败", str(ctx.exception))
 
 
 if __name__ == "__main__":

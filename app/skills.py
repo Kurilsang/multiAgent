@@ -163,6 +163,35 @@ def render_skill_md(skill: Skill) -> str:
     return "\n".join(lines) + "\n"
 
 
+def parse_external_skill(text: str) -> Skill:
+    """第三方技能包（目录市场）宽松解析：仅取 name/description/正文。
+
+    与自有技能的严格解析不同：frontmatter 未知字段（生态常见的
+    allowed-tools 等）**一律丢弃而非拒绝**——字段值根本不进上下文，注入
+    面不变；外部工具名与本工具注册表不通，工具依赖留空（用户可在包内补
+    tools 声明）。name/description/正文仍走 validate_pack 同一套上限。
+    """
+    match = re.match(r"^\s*---\s*\n(.*?)\n---\s*\n?", text or "", re.S)
+    head = match.group(1) if match else ""
+    fields = {"name": "", "description": ""}
+    for raw in head.splitlines():
+        if ":" not in raw or raw.lstrip().startswith("- "):
+            continue
+        key, value = raw.split(":", 1)
+        key = key.strip()
+        if key in fields and not fields[key]:
+            fields[key] = value.strip()[:200]
+    body = text[match.end() :].strip("\n") if match else (text or "").strip("\n")
+    skill = Skill(
+        name=fields["name"].strip(),
+        description=fields["description"],
+        guide=body,
+        tools=(),
+    )
+    validate_pack(skill.name, skill.description, skill.guide, skill.tools, set())
+    return skill
+
+
 def resolve_skills_dir(directory: str, project_root: Path) -> Path:
     """技能目录解析：相对路径锚定项目根。"""
     path = Path(directory)

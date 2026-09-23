@@ -56,6 +56,7 @@ class StubSettings:
     agent_max_iterations = 8
     skills_catalog_max = 30
     chat_max_tool_turns = 4
+    catalog_base_url = "http://catalog.test"
 
     def api_key_for(self, provider: str) -> str:
         return "test-key"

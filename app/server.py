@@ -21,6 +21,11 @@
     POST /skills/{name}/disable    禁用技能
     DELETE /skills/{name}          删除技能包
     POST /skills/install  安装 {"source": "git"|"local", "url"|"path": "...", "subpath": "..."}
+    POST /skills/install  安装 {"source": "catalog"|"git"|"local", ...}
+    GET  /market/sources  在线目录各源状态（爬取服务代理）
+    GET  /market/search   在线目录搜索 ?q=&source=&page=&page_size=
+    GET  /market/detail   在线目录详情 ?id=&source=（SKILL.md 预览 + 审计徽标）
+    POST /market/refresh  触发一次目录爬取 {"source"?: "..."}
     GET  /export          导出主对话历史，?format=markdown(默认)|json
     POST /reset           清空对话上下文
 """
@@ -57,6 +62,7 @@ from .skills import (
     catalog_section,
     install_from_dir,
     install_from_git,
+    parse_external_skill,
     resolve_skills_dir,
 )
 from .tools import SKILL_TOOL_NAMES, default_registry, skill_tools
@@ -519,18 +525,123 @@ def delete_skill(name: str) -> dict:
 
 
 class InstallRequest(BaseModel):
-    source: str  # git | local（在处理函数中校验，给出中文错误）
+    source: str  # catalog | git | local（在处理函数中校验，给出中文错误）
     url: str = ""
     path: str = ""
     subpath: str = ""
+    catalog_id: str = ""
+    source_platform: str = ""
+
+
+# ---- 技能在线目录代理（/market/*）：主服务零外网，一切经爬取服务 ----
+
+
+def _catalog_client():
+    """爬取服务客户端（测试注入点：替换为 fake 即可断言零外网）。"""
+    import httpx
+
+    return httpx.Client(base_url=settings.catalog_base_url.strip(), timeout=15.0)
+
+
+def _market_proxy(method: str, path: str, **kwargs) -> dict:
+    if not settings.catalog_base_url.strip():
+        raise HTTPException(
+            status_code=503, detail="在线目录未启用（未配置 CATALOG_BASE_URL）"
+        )
+    try:
+        response = _catalog_client().request(method, path, **kwargs)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"在线目录暂不可用: {exc}") from exc
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", "")
+        except Exception:
+            detail = ""
+        detail = detail or f"在线目录返回错误（HTTP {response.status_code}）"
+        status = response.status_code if response.status_code < 500 else 502
+        raise HTTPException(status_code=status, detail=detail)
+    return response.json()
+
+
+@app.get("/market/sources")
+def market_sources() -> dict:
+    return _market_proxy("GET", "/internal/sources")
+
+
+@app.get("/market/search")
+def market_search(
+    q: str = "", source: str = "", page: int = 1, page_size: int = 20
+) -> dict:
+    return _market_proxy(
+        "GET",
+        "/internal/search",
+        params={"q": q, "source": source, "page": page, "page_size": page_size},
+    )
+
+
+@app.get("/market/detail")
+def market_detail(id: str, source: str) -> dict:
+    return _market_proxy("GET", "/internal/detail", params={"id": id, "source": source})
+
+
+@app.post("/market/refresh")
+def market_refresh(payload: dict | None = None) -> dict:
+    return _market_proxy("POST", "/internal/refresh", json=payload or {})
+
+
+def _install_from_catalog(req: InstallRequest) -> dict:
+    """目录包安装：文件集经既有校验闸门落盘，附带文件丢弃并警告。
+
+    只落 SKILL.md 纯提示词（parse_external_skill：未知 frontmatter 字段
+    一律丢弃，字段值不进上下文）；脚本/资源文件不落盘，在报告中可见。
+    """
+    pack = _market_proxy(
+        "GET",
+        f"/internal/pack/{req.catalog_id}",
+        params={"source": req.source_platform},
+    )
+    extra = [str(name) for name in (pack.get("extra_files") or ())]
+    packs: list[dict] = []
+    results: list[dict] = []
+    for item in pack.get("files") or ():
+        path = str(item.get("path", ""))
+        contents = str(item.get("contents", ""))
+        if not path.endswith("SKILL.md"):
+            extra.append(path)
+            continue
+        try:
+            skill = parse_external_skill(contents)
+        except SkillError as exc:
+            results.append(
+                {"name": Path(path).parent.name or path, "status": "invalid", "detail": str(exc)}
+            )
+            continue
+        packs.append(
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "guide": skill.guide,
+                "tools": skill.tools,
+            }
+        )
+    label = f"catalog:{req.source_platform or pack.get('source', '')}"
+    results = results + skill_registry.install_packs(packs, source=label)
+    warnings = []
+    if extra:
+        warnings.append("附带文件已丢弃（纯提示词边界）: " + "、".join(sorted(set(extra))[:20]))
+    return {"source": label, "results": results, "warnings": warnings}
 
 
 @app.post("/skills/install")
 def install_skill(req: InstallRequest) -> dict:
-    """安装技能：Git 适配器（通用，覆盖全部 SKILL.md 生态）或本地目录导入。"""
+    """安装技能：目录包（经爬取服务）/ Git 适配器 / 本地目录导入。"""
     source = req.source.strip().lower()
     with _chat_lock:
         try:
+            if source == "catalog":
+                if not req.catalog_id.strip():
+                    raise SkillError("缺少目录条目 id")
+                return _install_from_catalog(req)
             if source == "git":
                 return install_from_git(skill_registry, req.url, req.subpath.strip())
             if source == "local":
@@ -540,7 +651,8 @@ def install_skill(req: InstallRequest) -> dict:
         except SkillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     raise HTTPException(
-        status_code=400, detail=f"不支持的安装来源: {req.source!r}，可选 git / local"
+        status_code=400,
+        detail=f"不支持的安装来源: {req.source!r}，可选 catalog / git / local",
     )
 
 

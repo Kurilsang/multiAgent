@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     llm_provider: str = "glm"
     llm_model: str = ""
 
+    # 技能在线目录爬取服务地址（留空 = 关闭在线目录功能并隐藏入口）
+    catalog_base_url: str = "http://127.0.0.1:8100"
+
     max_context_messages: int = Field(default=20, ge=2)
 
     # Agent 任务最大思考轮数（引擎侧硬上限，超过则以 partial 终态收尾）

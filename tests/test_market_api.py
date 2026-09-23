@@ -1,0 +1,178 @@
+"""主服务在线目录代理与目录包安装测试：fake 爬取服务注入，主服务零外网。"""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+import app.server as server
+
+from tests.test_server_stream import StubSettings
+
+
+class FakeCatalogHttp:
+    """爬取服务替身（server._catalog_client 注入点）；断言主服务零外网。"""
+
+    def __init__(self, routes=None):
+        self.routes = list((routes or {}).items())
+        self.calls: list[tuple] = []
+
+    def request(self, method, path, **kwargs):
+        self.calls.append((method, path, kwargs))
+        for needle, result in self.routes:
+            if needle in path:
+                return result
+        return FakeCatalogResponse({}, 404)
+
+
+class FakeCatalogResponse:
+    def __init__(self, payload: dict, status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+
+PACK_OK = {
+    "files": [
+        {
+            "path": "SKILL.md",
+            "contents": (
+                "---\nname: 市场技能\ndescription: 来自目录\n"
+                "allowed-tools: Read, Grep\ntools: []\n---\n\n正文。\n"
+            ),
+        }
+    ],
+    "extra_files": ["scripts/run.js"],
+    "origin": "owner/repo",
+    "source": "skills-sh",
+}
+
+PACK_INVALID = {
+    "files": [{"path": "SKILL.md", "contents": "没有 frontmatter"}],
+    "extra_files": [],
+    "source": "skills-sh",
+}
+
+
+class MarketApiTest(unittest.TestCase):
+    def setUp(self):
+        self._orig = (
+            server.settings,
+            server.tool_registry,
+            server.skill_registry,
+            server.skill_load_errors,
+            server.agent_engine,
+            server._catalog_client,
+        )
+        server.settings = StubSettings()
+        server.conversation.reset()
+        self._tmp = tempfile.TemporaryDirectory()
+        (
+            server.tool_registry,
+            server.skill_registry,
+            server.skill_load_errors,
+            server.agent_engine,
+        ) = server._build_wiring(Path(self._tmp.name))
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.conversation.reset()
+        (
+            server.settings,
+            server.tool_registry,
+            server.skill_registry,
+            server.skill_load_errors,
+            server.agent_engine,
+            server._catalog_client,
+        ) = self._orig
+        self._tmp.cleanup()
+
+    def test_market_proxies_pass_through(self):
+        fake = FakeCatalogHttp(
+            {
+                "/internal/sources": FakeCatalogResponse({"sources": []}),
+                "/internal/search": FakeCatalogResponse({"items": [1], "total": 1}),
+                "/internal/detail": FakeCatalogResponse({"skill_md": "x"}),
+                "/internal/refresh": FakeCatalogResponse({"results": []}),
+            }
+        )
+        server._catalog_client = lambda: fake
+        self.assertEqual(self.client.get("/market/sources").json(), {"sources": []})
+        self.assertEqual(self.client.get("/market/search", params={"q": "pdf"}).json()["total"], 1)
+        self.assertEqual(
+            self.client.get("/market/detail", params={"id": "a", "source": "s"}).json(),
+            {"skill_md": "x"},
+        )
+        self.assertEqual(self.client.post("/market/refresh", json={}).json(), {"results": []})
+
+    def test_disabled_when_base_url_empty(self):
+        server.settings.catalog_base_url = ""
+        resp = self.client.get("/market/sources")
+        self.assertEqual(resp.status_code, 503)
+        self.assertIn("未启用", resp.json()["detail"])
+
+    def test_catalog_unreachable_maps_to_502(self):
+        class BrokenHttp:
+            def request(self, method, path, **kwargs):
+                raise ConnectionError("拒绝连接")
+
+        server._catalog_client = lambda: BrokenHttp()
+        resp = self.client.get("/market/sources")
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn("暂不可用", resp.json()["detail"])
+
+    def test_catalog_error_passthrough(self):
+        fake = FakeCatalogHttp(
+            {"/internal/detail": FakeCatalogResponse({"detail": "未配置的源: x"}, 404)}
+        )
+        server._catalog_client = lambda: fake
+        resp = self.client.get("/market/detail", params={"id": "a", "source": "x"})
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("未配置的源", resp.json()["detail"])
+
+    def test_install_from_catalog_drops_extras_and_unknown_fields(self):
+        fake = FakeCatalogHttp({"/internal/pack": FakeCatalogResponse(PACK_OK)})
+        server._catalog_client = lambda: fake
+        resp = self.client.post(
+            "/skills/install",
+            json={"source": "catalog", "catalog_id": "owner/repo/市场技能", "source_platform": "skills-sh"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["results"][0]["status"], "installed")
+        self.assertEqual(data["source"], "catalog:skills-sh")
+        self.assertIn("已丢弃", data["warnings"][0])
+        self.assertIn("scripts/run.js", data["warnings"][0])
+
+        # 只落 SKILL.md 纯提示词：无脚本、未知 frontmatter 字段未进包
+        names = [s["name"] for s in self.client.get("/skills").json()["skills"]]
+        self.assertEqual(names, ["市场技能"])
+        content = self.client.get("/skills/市场技能").json()["content"]
+        self.assertNotIn("allowed-tools", content)
+        self.assertIn("正文。", content)
+        # 取包经爬取服务（零外网断言：fake 记录了唯一一次取包调用）
+        self.assertEqual([call[1] for call in fake.calls], ["/internal/pack/owner/repo/市场技能"])
+
+    def test_install_from_catalog_invalid_pack_reported(self):
+        fake = FakeCatalogHttp({"/internal/pack": FakeCatalogResponse(PACK_INVALID)})
+        server._catalog_client = lambda: fake
+        resp = self.client.post(
+            "/skills/install",
+            json={"source": "catalog", "catalog_id": "a/b/c", "source_platform": "skills-sh"},
+        )
+        results = resp.json()["results"]
+        self.assertEqual(results[0]["status"], "invalid")
+        self.assertIn("frontmatter", results[0]["detail"])
+
+    def test_install_requires_catalog_id(self):
+        server._catalog_client = lambda: FakeCatalogHttp()
+        resp = self.client.post("/skills/install", json={"source": "catalog"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("缺少目录条目", resp.json()["detail"])
+
+
+if __name__ == "__main__":
+    unittest.main()

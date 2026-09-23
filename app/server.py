@@ -105,7 +105,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="multiagent",
-    description="内部网关场景 Agent —— 第三步：技能市场（SKILL.md 文件化 + 动态清单 + 双通道调用）",
+    description="内部网关场景 Agent —— 第四步：技能市场 + 在线目录（SKILL.md 文件化 + 动态清单 + 双通道调用 + 浏览点装）",
 )
 
 

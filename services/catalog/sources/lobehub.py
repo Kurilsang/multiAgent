@@ -11,8 +11,8 @@ CLI 用法）：
   urn:ietf:params:oauth:client-assertion-type:jwt-bearer；HS256，iss=sub=clientId，
   aud=令牌端点，签名密钥 = clientSecret）
 
-凭证（client_id/client_secret）由注册产生、只存本地凭证仓（C19 接 SQLite），
-日志严禁落凭证。详情/目录包见 20 号工单。
+凭证（client_id/client_secret）由注册产生、只存本地凭证仓（SqliteCredsStore，
+见 store.py），日志严禁落凭证。详情/目录包见本文件 detail / fetch_pack。
 """
 
 from __future__ import annotations

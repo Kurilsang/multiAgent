@@ -38,6 +38,6 @@ POST /internal/refresh        {"source"?: "..."} 一次爬取（逐源降级，�
 ## 目录
 
 - `schema.py` — 统一条目/目录包 schema + 不可信输入清洗
-- `store.py` — 条目缓存与源状态（内存实现；SQLite 实现见 19 号工单）
+- `store.py` — 条目缓存与源状态 + 平台凭证仓（MemoryStore / SqliteStore，后者见 SqliteStore 类）
 - `sources/` — 平台适配器（skills.sh / LobeHub），差异在此归一
 - `app.py` — /internal/* 路由；`config.py` — 环境变量配置

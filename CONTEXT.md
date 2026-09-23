@@ -1,6 +1,6 @@
 # multiagent
 
-内部网关场景的多厂商 LLM 对话服务。当前演进到第二步:在纯对话之上引入 ReAct 式单 Agent 自主执行循环。
+内部网关场景的多厂商 LLM 对话服务。当前演进到第三步:在 ReAct 单 Agent 循环之上落地技能市场(SKILL.md 文件化技能包 + 动态清单 + 双通道调用)。
 
 ## Language
 

@@ -1,6 +1,6 @@
 # multiagent
 
-针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式。
+针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用。
 
 ## 特性
 
@@ -138,7 +138,7 @@ tests/
 └── test_server_stream.py
 ```
 
-术语表见 [CONTEXT.md](CONTEXT.md)；架构决策见 [docs/adr/](docs/adr/)。
+术语表见 [CONTEXT.md](CONTEXT.md)；架构决策见 [docs/adr/](docs/adr/)；设计规格见 [docs/specs/](docs/specs/)。
 
 ## 配置说明
 
@@ -165,7 +165,7 @@ python -m app.cli --provider <厂商>
 python -m unittest discover tests -v
 ```
 
-测试不发起真实请求：LLM 层用脚本化 fake（tests/fakes.py），工具为纯函数占位集。
+测试不发起真实请求：LLM 层用脚本化 fake（tests/fakes.py），工具为纯函数占位集，技能安装测试用临时目录与本地 git 仓库离线克隆。
 
 ## 已知范围限制
 

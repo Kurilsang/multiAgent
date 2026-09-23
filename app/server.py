@@ -32,24 +32,43 @@ from .agent import (
     TaskFinished,
     TaskStarted,
     ThoughtDelta,
-    demo_time_report_skill,
 )
-from .config import PROVIDERS, ConfigError, Settings, resolve_target
+from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
 from .conversation import Conversation
 from .export import to_json, to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta
-from .tools import default_registry
+from .skills import SkillRegistry, resolve_skills_dir
+from .tools import default_registry, skill_tools
 
 settings = Settings()
 llm = LLMClient(settings)
 conversation = Conversation(
     system_prompt=None, max_messages=settings.max_context_messages
 )
-agent_engine = AgentEngine(
-    llm,
-    default_registry(),
-    max_iterations=settings.agent_max_iterations,
-    skills=(demo_time_report_skill(),),
+
+
+def _build_wiring(skills_dir: Path):
+    """构建工具/技能注册表与 Agent 引擎（测试可换技能目录重建整套）。
+
+    技能元工具先注册（create_skill 的校验基准含元工具），再热加载技能包。
+    """
+    tools = default_registry()
+    skills = SkillRegistry(skills_dir, tools=tools)
+    for tool in skill_tools(skills):
+        tools.register(tool)
+    errors = skills.reload()
+    engine = AgentEngine(
+        llm,
+        tools,
+        max_iterations=settings.agent_max_iterations,
+        skills=skills,
+        catalog_max=settings.skills_catalog_max,
+    )
+    return tools, skills, errors, engine
+
+
+tool_registry, skill_registry, skill_load_errors, agent_engine = _build_wiring(
+    resolve_skills_dir(settings.skills_dir, PROJECT_ROOT)
 )
 
 # 单会话范围：串行化对话轮次，避免并发 /chat 互相污染同一份历史
@@ -59,7 +78,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="multiagent",
-    description="内部网关场景 Agent —— 第二步：ReAct 单 Agent（多厂商对话 + 工具调用 + 全链路流式）",
+    description="内部网关场景 Agent —— 第三步：技能市场（SKILL.md 文件化 + 动态清单 + 双通道调用）",
 )
 
 

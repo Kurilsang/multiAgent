@@ -49,6 +49,9 @@ class StubSettings:
 
     llm_provider = "glm"
     llm_model = ""
+    agent_max_iterations = 8
+    skills_catalog_max = 30
+    chat_max_tool_turns = 4
 
     def api_key_for(self, provider: str) -> str:
         return "test-key"
@@ -61,8 +64,8 @@ class FakeAgentEngine:
         self.events = events
         self.calls = []
 
-    def run(self, task, provider=None, model=None):
-        self.calls.append((task, provider, model))
+    def run(self, task, provider=None, model=None, activated=()):
+        self.calls.append((task, provider, model, activated))
         yield from self.events
 
 

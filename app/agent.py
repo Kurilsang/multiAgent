@@ -5,6 +5,8 @@
 双层终止（docs/adr/0002）：模型侧 finish 工具宣告语义完成，
 引擎侧迭代硬上限与死循环止损兜底。
 轨迹独立于主对话：任务结束由调用方把「用户请求 + 最终答案」回写主对话。
+技能走上下文通道（见 skills.py）：动态清单 + use_skill 按需展开，
+run() 的 activated 参数用于 `/技能名` 显式点名的确定性预激活。
 """
 
 import json
@@ -13,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from .llm import LLMError, ReasoningDelta, ResponseToolCalls, TextDelta
+from .skills import Skill, SkillRegistry, catalog_section
 from .tools import ToolRegistry
 
 # 判断节点连续看到相同（工具, 参数）达此次数即判死循环
@@ -45,28 +48,6 @@ _BASE_PROTOCOL = (
     "你是自主执行任务的助手。逐步思考，需要事实或计算时调用提供的工具；"
     "获得足够信息后，调用 finish 工具交付面向用户的最终答案。"
 )
-
-
-@dataclass(frozen=True)
-class Skill:
-    """技能：提示词级能力包，声明依赖的工具（见 CONTEXT.md「技能」）。"""
-
-    name: str
-    guide: str
-    tools: tuple[str, ...] = ()
-
-
-def demo_time_report_skill() -> Skill:
-    """演示技能：打通「技能注入 → 多步工具调用 → finish」全链路。"""
-    return Skill(
-        name="时间报告",
-        guide=(
-            "当用户询问涉及当前日期时间的推算（如『3 天后是几号』）时："
-            "先调用 get_current_time 获取当前时间，再基于它推理目标日期，"
-            "需要数值计算时用 calculator，最后用 finish 交付完整结论。"
-        ),
-        tools=("get_current_time", "calculator"),
-    )
 
 
 class AgentState(Enum):
@@ -223,22 +204,17 @@ class AgentEngine:
         tools: ToolRegistry,
         max_iterations: int = 8,
         max_observation_chars: int = DEFAULT_MAX_OBSERVATION_CHARS,
-        skills: tuple[Skill, ...] = (),
+        skills: SkillRegistry | None = None,
+        catalog_max: int = 30,
     ):
         if not tools.names():
             raise ValueError("Agent 引擎至少需要一个工具，否则无法形成行动-观察回路")
         if max_iterations < 1:
             raise ValueError("max_iterations 至少为 1")
-        registered = set(tools.names())
-        for skill in skills:
-            missing = [name for name in skill.tools if name not in registered]
-            if missing:
-                raise ValueError(
-                    f"技能 {skill.name} 依赖未注册的工具: {'、'.join(missing)}"
-                )
         self.llm = llm
         self._tools = tools
-        self._skills = tuple(skills)
+        self._skills = skills
+        self._catalog_max = catalog_max
         self._max_iterations = max_iterations
         self._max_observation_chars = max_observation_chars
         # finish 是协议工具：随每次请求注入 schema，但不属于注册表
@@ -249,8 +225,13 @@ class AgentEngine:
         task: str,
         provider: str | None = None,
         model: str | None = None,
+        activated: tuple[Skill, ...] = (),
     ) -> Iterator[AgentEvent]:
-        """执行一次任务，逐个产出事件；终态事件必为 TaskFinished 或 TaskFailed。"""
+        """执行一次任务，逐个产出事件；终态事件必为 TaskFinished 或 TaskFailed。
+
+        activated 为 `/技能名` 显式点名的预激活技能：guide 直接进 system
+        prompt，不等模型 use_skill（清单与自主激活仍同时在场）。
+        """
         yield TaskStarted(task=task)
         trace: list[dict] = [{"role": "user", "content": task}]
         recent_actions: list[tuple[str, str]] = []
@@ -266,7 +247,10 @@ class AgentEngine:
                 calls = []
                 try:
                     stream = self.llm.chat_events(
-                        self._messages_for_api(trace), provider, model, self._schemas
+                        self._messages_for_api(trace, activated),
+                        provider,
+                        model,
+                        self._schemas,
                     )
                     for event in stream:
                         if isinstance(event, TextDelta):
@@ -321,7 +305,6 @@ class AgentEngine:
                 for call in parsed_calls:
                     yield ActionStarted(tool_name=call.name, arguments=call.arguments)
                     result, is_error = self._execute(call)
-                    result = truncate_text(result, self._max_observation_chars)
                     yield ActionObserved(tool_name=call.name, result=result, is_error=is_error)
                     trace.append(_tool_message(call.id, result))
                     recent_actions.append((call.name, call.arguments_json))
@@ -349,15 +332,27 @@ class AgentEngine:
         yield terminal
 
     def _execute(self, call: _ParsedCall) -> tuple[str, bool]:
-        """执行一次工具调用；失败转为错误观察值回灌，模型可自愈。"""
+        """执行一次工具调用；失败转为错误观察值回灌，模型可自愈。
+
+        观察值默认按上限截断保护上下文；full_result 工具（如 use_skill
+        的技能正文）是刻意加载的上下文，完整回灌。
+        """
         try:
             tool = self._tools.get(call.name)
         except KeyError as exc:
             return str(exc), True
         try:
-            return tool.run(call.arguments), False
+            result = tool.run(call.arguments)
         except Exception as exc:  # 工具内部错误不终止任务，交给模型决断
-            return f"工具 {call.name} 执行失败：{exc}", True
+            return (
+                truncate_text(
+                    f"工具 {call.name} 执行失败：{exc}", self._max_observation_chars
+                ),
+                True,
+            )
+        if not tool.full_result:
+            result = truncate_text(result, self._max_observation_chars)
+        return result, False
 
     def _is_dead_loop(self, recent_actions: list[tuple[str, str]]) -> bool:
         if len(recent_actions) < DEAD_LOOP_THRESHOLD:
@@ -366,22 +361,34 @@ class AgentEngine:
             len(set(recent_actions[-DEAD_LOOP_THRESHOLD:])) == 1
         )
 
-    def _messages_for_api(self, trace: list[dict]) -> list[dict]:
-        """system 协议 + 截断后的轨迹；截断保留任务消息与最近轨迹。"""
+    def _messages_for_api(
+        self, trace: list[dict], activated: tuple[Skill, ...] = ()
+    ) -> list[dict]:
+        """system 协议 + 截断后的轨迹；截断保留任务消息与最近轨迹。
+
+        技能清单每次调用现场生成，安装/卸载/启停即时反映（动态清单）。
+        """
         trimmed = trace
         if len(trace) > MAX_TRACE_MESSAGES:
             trimmed = [trace[0], *trace[-(MAX_TRACE_MESSAGES - 1) :]]
-        return [{"role": "system", "content": self._system_prompt()}, *trimmed]
+        return [
+            {"role": "system", "content": self._system_prompt(activated)},
+            *trimmed,
+        ]
 
-    def _system_prompt(self) -> str:
-        """基础协议 + 已启用技能的受控文本块（技能走上下文通道）。"""
+    def _system_prompt(self, activated: tuple[Skill, ...] = ()) -> str:
+        """基础协议 + 预激活技能的受控文本块 + 动态技能清单。"""
         sections = [_BASE_PROTOCOL]
-        for skill in self._skills:
+        for skill in activated:
             dependencies = "、".join(skill.tools) or "无"
             sections.append(
-                f"## 可用技能：{skill.name}\n{skill.guide}\n"
+                f"## 已激活技能：{skill.name}\n{skill.guide}\n"
                 f"（建议使用的工具：{dependencies}）"
             )
+        if self._skills is not None:
+            catalog = catalog_section(self._skills, self._catalog_max)
+            if catalog:
+                sections.append(catalog)
         return "\n\n".join(sections)
 
     @staticmethod

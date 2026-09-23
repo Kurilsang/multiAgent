@@ -32,10 +32,10 @@ from .agent import (
     TaskFailed,
     TaskFinished,
     ThoughtDelta,
-    demo_time_report_skill,
     truncate_text,
 )
 from .config import (
+    PROJECT_ROOT,
     PROVIDERS,
     ConfigError,
     ResolvedTarget,
@@ -45,7 +45,8 @@ from .config import (
 from .conversation import Conversation
 from .export import to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta
-from .tools import default_registry
+from .skills import SkillRegistry, resolve_skills_dir
+from .tools import default_registry, skill_tools
 
 console = Console()
 
@@ -201,11 +202,22 @@ def main() -> int:
         system_prompt=args.system, max_messages=settings.max_context_messages
     )
     llm = LLMClient(settings)
+
+    # 技能注册表：技能元工具先注册（校验基准含元工具），再热加载技能包
+    tool_registry = default_registry()
+    skill_registry = SkillRegistry(
+        resolve_skills_dir(settings.skills_dir, PROJECT_ROOT), tools=tool_registry
+    )
+    for tool in skill_tools(skill_registry):
+        tool_registry.register(tool)
+    for error in skill_registry.reload():
+        console.print(f"[yellow]技能加载警告：{escape(error)}[/yellow]")
     agent = AgentEngine(
         llm,
-        default_registry(),
+        tool_registry,
         max_iterations=settings.agent_max_iterations,
-        skills=(demo_time_report_skill(),),
+        skills=skill_registry,
+        catalog_max=settings.skills_catalog_max,
     )
 
     console.print("[bold]multiagent 终端对话[/bold]")

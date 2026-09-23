@@ -4,7 +4,9 @@
 只断言外显事件序列、终止原因与回灌内容，不触及内部状态枚举。
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.agent import (
     ActionObserved,
@@ -16,7 +18,8 @@ from app.agent import (
     ThoughtDelta,
 )
 from app.llm import LLMError, ResponseToolCalls, ToolCall
-from app.tools import default_registry
+from app.skills import Skill, SkillRegistry
+from app.tools import default_registry, skill_tools
 
 from tests.fakes import FakeLLMClient, make_registry, text_round, tool_round
 
@@ -198,41 +201,108 @@ class ObservationLimitTest(unittest.TestCase):
 
 
 class SkillInjectionTest(unittest.TestCase):
-    def make_engine_with_skill(self) -> AgentEngine:
-        from app.agent import Skill
-
-        skill = Skill(
+    def make_skill(self) -> Skill:
+        return Skill(
             name="时间报告",
+            description="日期推算",
             guide="先取时间，再换算日期",
             tools=("get_current_time", "calculator"),
         )
-        return make_engine([text_round("答案")], registry=default_registry(), skills=(skill,))
 
-    def test_skill_guide_injected_into_system_prompt(self):
-        engine = self.make_engine_with_skill()
-        list(engine.run("测试任务"))
+    def test_activated_skill_guide_injected_into_system_prompt(self):
+        """/技能名 显式点名的预激活：guide 直接进 system，不等 use_skill。"""
+        engine = make_engine([text_round("答案")], registry=default_registry())
+        list(engine.run("测试任务", activated=(self.make_skill(),)))
         messages, _ = engine.llm.calls[0]
         system = messages[0]["content"]
         self.assertIn("时间报告", system)
         self.assertIn("先取时间，再换算日期", system)
         self.assertIn("get_current_time", system)
 
+    def test_dynamic_catalog_injected_from_registry(self):
+        """动态清单只带名称 + 描述；正文按需由 use_skill 展开。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = default_registry()
+            skills = SkillRegistry(Path(tmp), tools=tools)
+            for tool in skill_tools(skills):
+                tools.register(tool)
+            skills.create("时间报告", "日期推算", "先取时间，再换算日期", ("calculator",))
+            engine = make_engine([text_round("答案")], registry=tools, skills=skills)
+            list(engine.run("测试任务"))
+            system = engine.llm.calls[0][0][0]["content"]
+        self.assertIn("技能清单", system)
+        self.assertIn("时间报告", system)
+        self.assertIn("日期推算", system)
+        self.assertIn("use_skill", system)
+        self.assertNotIn("先取时间，再换算日期", system)
+
     def test_base_protocol_present_without_skills(self):
         engine = make_engine([text_round("答案")], registry=default_registry())
         list(engine.run("测试任务"))
         system = engine.llm.calls[0][0][0]["content"]
         self.assertIn("finish", system)
-        self.assertNotIn("可用技能", system)
+        self.assertNotIn("技能清单", system)
 
-    def test_skill_with_unregistered_tool_rejected(self):
-        from app.agent import Skill
 
-        with self.assertRaises(ValueError):
-            make_engine(
-                [],
-                registry=default_registry(),
-                skills=(Skill(name="坏技能", guide="g", tools=("missing",)),),
-            )
+class SkillToolLoopTest(unittest.TestCase):
+    """元工具走普通工具调用通道：use_skill 按需展开，create_skill 自愈。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tools = default_registry()
+        self.skills = SkillRegistry(Path(self._tmp.name), tools=tools)
+        for tool in skill_tools(self.skills):
+            tools.register(tool)
+        self.tools = tools
+        # 200 字正文，远超 max_observation_chars=50 的截断线
+        self.skills.create("时间报告", "日期推算", "x" * 200, ("calculator",))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_use_skill_guide_not_truncated(self):
+        engine = AgentEngine(
+            FakeLLMClient(
+                [
+                    tool_round("use_skill", {"name": "时间报告"}),
+                    tool_round("finish", {"answer": "done"}, call_id="call_2"),
+                ]
+            ),
+            self.tools,
+            max_observation_chars=50,
+            skills=self.skills,
+        )
+        events = list(engine.run("测试任务"))
+        observed = [e for e in events if isinstance(e, ActionObserved)][0]
+        self.assertFalse(observed.is_error)
+        self.assertIn("x" * 200, observed.result)
+
+    def test_create_skill_validation_error_fed_back_for_self_heal(self):
+        engine = AgentEngine(
+            FakeLLMClient(
+                [
+                    tool_round(
+                        "create_skill",
+                        {"name": "新技能", "description": "d", "guide": "g", "tools": ["missing"]},
+                    ),
+                    tool_round(
+                        "create_skill",
+                        {"name": "新技能", "description": "d", "guide": "g"},
+                        call_id="call_2",
+                    ),
+                    tool_round("finish", {"answer": "done"}, call_id="call_3"),
+                ]
+            ),
+            self.tools,
+            skills=self.skills,
+        )
+        events = list(engine.run("测试任务"))
+        observations = [e for e in events if isinstance(e, ActionObserved)]
+        self.assertTrue(observations[0].is_error)
+        self.assertIn("未注册的工具", observations[0].result)
+        self.assertFalse(observations[1].is_error)
+        self.assertIsNotNone(self.skills.get("新技能"))
+        self.assertEqual(events[-1].status, "completed")
 
 
 class EngineGuardTest(unittest.TestCase):

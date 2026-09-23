@@ -30,13 +30,14 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 - `app/agent.py` — ReAct 状态机引擎（见 docs/adr/0001、0002）：任务轨迹独立于主对话，双层终止（finish 工具 + `AGENT_MAX_ITERATIONS` 硬上限 + 死循环止损）；技能走上下文通道（动态清单 + run(activated=) 预激活）
 - `app/skills.py` — 技能注册表：SKILL.md 解析/校验（frontmatter 三字段白名单）、自产（create_skill）、启停状态（`skills/.installed.json`）、安装器（Git 适配器/本地导入）；文件态是唯一事实源，热重载
 - `app/tools.py` — 工具注册表（function calling 通道）+ 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）；新增工具只改注册表，引擎不感知；full_result=True 的观察值完整回灌不截断
-- `app/cli.py` / `app/server.py` — 两个入口；server 的 `/chat`、`/chat/stream`、`/agent/stream`、`/skills*` 共用线程锁串行化，定位单用户/低并发；聊天通道带 `CHAT_MAX_TOOL_TURNS` 有界迷你工具循环，`/技能名` 前缀确定性路由任务通道并预激活
-- `app/static/index.html` — 无框架单文件 WebUI（聊天流式 + 任务时间线 + `/` 技能弹层 + 技能市场视图）
+- `app/cli.py` / `app/server.py` — 两个入口；server 的 `/chat`、`/chat/stream`、`/agent/stream`、`/skills*`、`/market*` 共用线程锁串行化，定位单用户/低并发；聊天通道带 `CHAT_MAX_TOOL_TURNS` 有界迷你工具循环，`/技能名` 前缀确定性路由任务通道并预激活
+- `services/catalog/` — 技能在线目录爬取服务（独立进程，独立 requirements）：**唯一与外网交互的组件（隔离区）**，零密钥、零技能包写权限，`/internal/*` 仅对内网；独立部署升级 = 本包原样搬出 + 主服务改 `CATALOG_BASE_URL`（详见其 README）；主服务默认零外网
+- `app/static/index.html` — 无框架单文件 WebUI（聊天流式 + 任务时间线 + `/` 技能弹层 + 技能市场视图：已安装/在线浏览双子面板 + 单次确认卡）
 - `tests/fakes.py` — 预约定测试缝隙：脚本化 LLM fake；测试不发真实请求（git 安装测试用本地仓库离线克隆）
-- 约定：新增厂商只改 `config.py` 的 `PROVIDERS` + `.env`；错误信息从用户视角写；配置类改动要同步 `.env.example` 和 README；技能包只写 SKILL.md 纯提示词（frontmatter 仅 name/description/tools，不携带可执行脚本）
+- 约定：新增厂商只改 `config.py` 的 `PROVIDERS` + `.env`；错误信息从用户视角写；配置类改动要同步 `.env.example` 和 README；技能包只写 SKILL.md 纯提示词（frontmatter 仅 name/description/tools，不携带可执行脚本）；**外网抓取只允许发生在 `services/catalog/`**，主服务保持内网纯净
 
 ## 当前状态与下一步
 
-- 已完成：三厂商对话、上下文截断、运行时切厂商、ReAct 单 Agent 循环（function calling + 工具/技能注册表）、CLI + WebUI 全链路流式 SSE、双层终止与死循环止损、思考链统一转写与展示（reasoning_content / 内联 `<think>` → ReasoningDelta）、对话导出（WebUI 导出按钮、CLI `/export`、HTTP `GET /export`）、技能市场（SKILL.md 文件化技能包、动态清单 + use_skill/search_skills/create_skill 元工具、聊天通道自主激活与 `/技能名` 前缀路由、Git/本地安装与启停删管理 API、WebUI `/` 弹层与市场视图）
-- 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`）或 `/技能名` 点名，无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复；第三方技能包是提示注入面（格式校验兜底，不做内容审计）
-- 下一步：多 Agent 协作（状态机已留后门：新增状态与迁移边）、MCP 工具适配器（灌入同一注册表）、技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub）、多会话持久化、网关逻辑（路由/鉴权/审计）
+- 已完成：三厂商对话、上下文截断、运行时切厂商、ReAct 单 Agent 循环（function calling + 工具/技能注册表）、CLI + WebUI 全链路流式 SSE、双层终止与死循环止损、思考链统一转写与展示（reasoning_content / 内联 `<think>` → ReasoningDelta）、对话导出（WebUI 导出按钮、CLI `/export`、HTTP `GET /export`）、技能市场（SKILL.md 文件化技能包、动态清单 + use_skill/search_skills/create_skill 元工具、聊天通道自主激活与 `/技能名` 前缀路由、Git/本地安装与启停删管理 API、WebUI `/` 弹层与市场视图）、技能在线目录（services/catalog 爬取服务隔离区：skills.sh HTML 降级 + LobeHub M2M 市场 API、SQLite 缓存 + 定时刷新、/market/* 代理、目录包安装 source=catalog、WebUI 在线浏览 + 单次确认卡）
+- 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`）或 `/技能名` 点名，无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复；第三方技能包是提示注入面（格式校验兜底，不做内容审计）；skills.sh 官方 API 为 OIDC 专属（走 HTML 降级，页面改版需跟进适配器）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）
+- 下一步：多 Agent 协作（状态机已留后门：新增状态与迁移边）、MCP 工具适配器（灌入同一注册表）、ClawHub 适配器与已验证源免确认白名单、`/` 弹层混入在线目录、多会话持久化、网关逻辑（路由/鉴权/审计）

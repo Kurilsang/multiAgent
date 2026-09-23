@@ -9,6 +9,7 @@
 - **Agent 任务**：`/agent` 发起自主多步任务——状态机编排（见 docs/adr/0001）、双层终止（见 docs/adr/0002）、死循环止损、partial 进展摘要
 - **工具 + 技能**：工具走 function calling 通道；技能为文件化提示词包（`skills/<名称>/SKILL.md`），动态清单 + `use_skill` 按需激活，Agent 可用 `create_skill` 自产技能
 - **技能市场**：预设平台 / Git URL / 本地目录安装（覆盖 anthropics/skills、skills.sh 等 SKILL.md 生态），WebUI 管理启停/删除/查看，热生效无需重启
+- **技能在线目录**：独立爬取服务（`services/catalog/`，隔离区）抓取 skills.sh / LobeHub 目录——SQLite 缓存 + 定时刷新 + 陈旧标注；市场页「在线浏览」搜索翻页 → 单次确认卡（SKILL.md 预览 + Socket/Snyk 等审计徽标）→ 一键安装；主服务零外网
 - **双通道调用**：任务通道全量工具 + 自主激活；聊天通道注入清单、模型自主判断是否借助技能；`/技能名 …` 显式点名确定性升级为任务
 - **运行时切换**：CLI 中 `/model glm` 随时切换厂商；API 请求中传 `provider` 字段
 - **思考链展示**：`reasoning_content` 字段（GLM / DeepSeek 思考模型）与内联 `<think>` 标签（MiniMax M 系列）统一转写，WebUI / CLI / 任务时间线均实时展示，不污染对话历史
@@ -30,10 +31,14 @@ copy .env.example .env        # 编辑 .env，填入你实际使用的厂商 Key
 # 3a. WebUI（浏览器访问 http://127.0.0.1:8000）
 python -m app.server
 
-# 3b. HTTP API 服务（与 WebUI 同一服务）
+# 3b. 技能在线目录爬取服务（可选，独立进程；不启动则在线目录入口自动隐藏）
+pip install -r services/catalog/requirements.txt
+python -m services.catalog          # 默认 127.0.0.1:8100
+
+# 3c. HTTP API 服务（与 WebUI 同一服务）
 python -m app.server          # 默认 127.0.0.1:8000
 
-# 3c. 终端对话
+# 3d. 终端对话
 python -m app.cli
 python -m app.cli --provider deepseek
 ```
@@ -86,13 +91,22 @@ curl -X POST http://127.0.0.1:8000/skills/时间报告/disable
 curl -X POST http://127.0.0.1:8000/skills/时间报告/enable
 curl -X DELETE http://127.0.0.1:8000/skills/时间报告
 
-# 安装技能：Git 适配器（覆盖 anthropics/skills、skills.sh 等 SKILL.md 生态）或本地导入
+# 安装技能：目录包（经爬取服务，点点点的后端）/ Git 适配器 / 本地导入
+curl -X POST http://127.0.0.1:8000/skills/install \
+  -H "Content-Type: application/json" \
+  -d '{"source": "catalog", "catalog_id": "owner/repo/skill", "source_platform": "skills-sh"}'
 curl -X POST http://127.0.0.1:8000/skills/install \
   -H "Content-Type: application/json" \
   -d '{"source": "git", "url": "https://github.com/anthropics/skills", "subpath": ""}'
 curl -X POST http://127.0.0.1:8000/skills/install \
   -H "Content-Type: application/json" \
   -d '{"source": "local", "path": "D:/skills-source"}'
+
+# 在线目录（爬取服务代理；CATALOG_BASE_URL 未配置时返回 503）
+curl "http://127.0.0.1:8000/market/search?q=pdf&page=1&page_size=10"
+curl http://127.0.0.1:8000/market/sources
+curl "http://127.0.0.1:8000/market/detail?id=owner/repo/skill&source=skills-sh"
+curl -X POST http://127.0.0.1:8000/market/refresh -H "Content-Type: application/json" -d '{}'
 
 # 导出主对话历史（?format=json 可选，默认 markdown）
 curl http://127.0.0.1:8000/export
@@ -118,14 +132,22 @@ app/
 ├── tools.py         # 工具注册表 + 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）
 ├── export.py        # 对话导出格式化（markdown / json 纯函数）
 ├── cli.py           # 终端入口（/chat 流式 + /agent 任务 + /export 导出）
-├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/skills、/export）
+├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/skills、/market、/export）
 └── static/
-    └── index.html   # WebUI（聊天流式 + 任务时间线 + / 技能弹层 + 技能市场，无框架，单文件）
+    └── index.html   # WebUI（聊天流式 + 任务时间线 + / 技能弹层 + 技能市场：已安装/在线浏览 + 确认卡，无框架，单文件）
+services/
+└── catalog/         # 技能在线目录爬取服务（独立进程，隔离区 = 唯一外网面）
+    ├── app.py       # /internal/* 窄合同 + /health
+    ├── schema.py    # 统一条目/目录包 schema + 不可信输入清洗
+    ├── store.py     # SQLite 缓存 + 源状态 + 平台凭证仓
+    ├── refresher.py # 一次爬取 + 后台定时刷新（降级读缓存）
+    ├── sources/     # 平台适配器（skills.sh HTML 降级 / LobeHub M2M API）
+    └── README.md    # ⚠ 隔离边界与独立部署升级路径
 skills/
 └── 时间报告/
     └── SKILL.md     # 内置演示技能包（其余技能经市场安装或 Agent create_skill 自产）
 tests/
-├── fakes.py             # 脚本化 LLM fake（预约定测试缝隙）
+├── fakes.py             # 预约定测试缝隙（LLM fake + 目录源/HTTP fake）
 ├── test_config.py
 ├── test_conversation.py
 ├── test_tools.py
@@ -134,6 +156,12 @@ tests/
 ├── test_agent.py
 ├── test_skills.py       # 技能注册表、元工具与安装器
 ├── test_skills_api.py   # 技能管理 HTTP API
+├── test_catalog_schema.py  # 目录 schema 与清洗
+├── test_catalog_app.py     # 爬取服务 HTTP 面
+├── test_catalog_sources.py # 平台适配器（fixture 驱动）
+├── test_catalog_store.py   # SQLite 缓存 / 凭证仓 / 刷新器
+├── test_catalog_pack.py    # 目录包获取（git 坐标 / ZIP + zip-slip 防护）
+├── test_market_api.py      # 主服务 /market/* 代理与目录包安装
 ├── test_export.py
 └── test_server_stream.py
 ```
@@ -144,7 +172,7 @@ tests/
 
 见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）；`AGENT_MAX_ITERATIONS` 控制 Agent 任务的最大思考轮数（最小 1，超过则以 partial 进展摘要收尾）。
 
-技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）。
+技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）；`CATALOG_BASE_URL` 指向技能在线目录爬取服务（默认 `http://127.0.0.1:8100`，留空则关闭在线目录并隐藏入口）。爬取服务自身配置（`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` / `CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`）见 [services/catalog/README.md](services/catalog/README.md)。
 
 如需按厂商覆盖接入端点，设置 `<厂商>_BASE_URL`（如 `GLM_BASE_URL`）。典型场景：GLM Coding Plan 套餐 Key 只对编码专用端点生效，需设置 `GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`，否则标准端点会报 1113 余额不足。
 
@@ -173,6 +201,7 @@ python -m unittest discover tests -v
 - Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
 - MCP 工具接入未实现：工具注册表已预留适配位（远端工具灌入同一注册表即可）
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
+- 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
 - SSE 断连后任务不恢复，页面重开需重新发起
 
 ## 后续规划

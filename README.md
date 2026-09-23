@@ -7,7 +7,9 @@
 - **统一接入**：三家厂商均通过 OpenAI 兼容 API 接入，一个 SDK 覆盖全部
 - **上下文支持**：内存维护单会话历史，自动按上限截断（保留 system + 最近 N 条）
 - **Agent 任务**：`/agent` 发起自主多步任务——状态机编排（见 docs/adr/0001）、双层终止（见 docs/adr/0002）、死循环止损、partial 进展摘要
-- **工具 + 技能**：工具走 function calling 通道，技能走上下文通道（占位集：`get_current_time` / `calculator` + 「时间报告」演示技能）
+- **工具 + 技能**：工具走 function calling 通道；技能为文件化提示词包（`skills/<名称>/SKILL.md`），动态清单 + `use_skill` 按需激活，Agent 可用 `create_skill` 自产技能
+- **技能市场**：预设平台 / Git URL / 本地目录安装（覆盖 anthropics/skills、skills.sh 等 SKILL.md 生态），WebUI 管理启停/删除/查看，热生效无需重启
+- **双通道调用**：任务通道全量工具 + 自主激活；聊天通道注入清单、模型自主判断是否借助技能；`/技能名 …` 显式点名确定性升级为任务
 - **运行时切换**：CLI 中 `/model glm` 随时切换厂商；API 请求中传 `provider` 字段
 - **思考链展示**：`reasoning_content` 字段（GLM / DeepSeek 思考模型）与内联 `<think>` 标签（MiniMax M 系列）统一转写，WebUI / CLI / 任务时间线均实时展示，不污染对话历史
 - **对话导出**：WebUI 一键导出 Markdown（含任务轨迹与错误，可复制剪贴板）、CLI `/export`、HTTP `GET /export`（markdown / json）
@@ -76,6 +78,22 @@ curl -N -X POST http://127.0.0.1:8000/agent/stream \
   -d '{"task": "现在时间加 3 天是星期几"}'
 # 事件: task_started / thought_delta / action / observation / final | failed
 
+# 技能管理（技能包 = skills/<名称>/SKILL.md，改动热生效无需重启）
+curl http://127.0.0.1:8000/skills                    # 已装技能列表（含启停状态与加载错误）
+curl http://127.0.0.1:8000/skills/presets            # 预设平台源清单
+curl http://127.0.0.1:8000/skills/时间报告           # 技能详情（含 SKILL.md 原文）
+curl -X POST http://127.0.0.1:8000/skills/时间报告/disable
+curl -X POST http://127.0.0.1:8000/skills/时间报告/enable
+curl -X DELETE http://127.0.0.1:8000/skills/时间报告
+
+# 安装技能：Git 适配器（覆盖 anthropics/skills、skills.sh 等 SKILL.md 生态）或本地导入
+curl -X POST http://127.0.0.1:8000/skills/install \
+  -H "Content-Type: application/json" \
+  -d '{"source": "git", "url": "https://github.com/anthropics/skills", "subpath": ""}'
+curl -X POST http://127.0.0.1:8000/skills/install \
+  -H "Content-Type: application/json" \
+  -d '{"source": "local", "path": "D:/skills-source"}'
+
 # 导出主对话历史（?format=json 可选，默认 markdown）
 curl http://127.0.0.1:8000/export
 curl "http://127.0.0.1:8000/export?format=json"
@@ -95,13 +113,17 @@ app/
 ├── config.py        # .env 加载、厂商注册表、目标解析（支持按厂商覆盖 base_url）
 ├── llm.py           # OpenAI SDK 统一封装（流式/非流式、function calling、思考链转写、错误转译）
 ├── conversation.py  # 主对话历史管理与截断
-├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、技能通道
-├── tools.py         # 工具注册表 + 占位工具集（get_current_time / calculator）
+├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、动态技能清单/预激活
+├── skills.py        # 技能注册表：SKILL.md 解析/校验/自产、启停状态、安装器（Git/本地）
+├── tools.py         # 工具注册表 + 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）
 ├── export.py        # 对话导出格式化（markdown / json 纯函数）
 ├── cli.py           # 终端入口（/chat 流式 + /agent 任务 + /export 导出）
-├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/export）
+├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/skills、/export）
 └── static/
-    └── index.html   # WebUI（聊天流式 + 思考块 + 任务时间线 + 导出，无框架，单文件）
+    └── index.html   # WebUI（聊天流式 + 任务时间线 + / 技能弹层 + 技能市场，无框架，单文件）
+skills/
+└── 时间报告/
+    └── SKILL.md     # 内置演示技能包（其余技能经市场安装或 Agent create_skill 自产）
 tests/
 ├── fakes.py             # 脚本化 LLM fake（预约定测试缝隙）
 ├── test_config.py
@@ -110,6 +132,8 @@ tests/
 ├── test_llm_tools.py
 ├── test_llm_thinking.py
 ├── test_agent.py
+├── test_skills.py       # 技能注册表、元工具与安装器
+├── test_skills_api.py   # 技能管理 HTTP API
 ├── test_export.py
 └── test_server_stream.py
 ```
@@ -119,6 +143,8 @@ tests/
 ## 配置说明
 
 见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）；`AGENT_MAX_ITERATIONS` 控制 Agent 任务的最大思考轮数（最小 1，超过则以 partial 进展摘要收尾）。
+
+技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）。
 
 如需按厂商覆盖接入端点，设置 `<厂商>_BASE_URL`（如 `GLM_BASE_URL`）。典型场景：GLM Coding Plan 套餐 Key 只对编码专用端点生效，需设置 `GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`，否则标准端点会报 1113 余额不足。
 
@@ -146,11 +172,13 @@ python -m unittest discover tests -v
 - 单会话内存上下文：服务重启后历史与任务轨迹清空；接口内部已加锁串行化，适合单用户/低并发使用
 - Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
 - MCP 工具接入未实现：工具注册表已预留适配位（远端工具灌入同一注册表即可）
+- 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - SSE 断连后任务不恢复，页面重开需重新发起
 
 ## 后续规划
 
 - 多 Agent 协作（评审者/执行者分工，复用状态机引擎）
 - MCP 工具适配器
+- 技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub API）、zip 上传、版本与更新检查
 - 多会话管理与持久化
 - 网关特化逻辑（路由、鉴权、审计）

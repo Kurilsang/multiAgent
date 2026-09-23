@@ -38,6 +38,7 @@
   input { cursor: text; }
   select:hover, button:hover { border-color: var(--accent); }
   #clear-btn:hover { border-color: var(--error); color: var(--error); }
+  #market-btn { border-color: var(--accent-2); color: var(--accent); }
   #chat {
     flex: 1; overflow-y: auto; padding: 20px;
     display: flex; flex-direction: column; gap: 14px;
@@ -147,6 +148,44 @@
   .slash-desc { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .slash-item.active .slash-desc, .slash-item:hover .slash-desc { color: var(--text); }
   .slash-hint { padding: 6px 12px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); }
+
+  /* ===== 技能市场 ===== */
+  #skills-view {
+    flex: 1; overflow-y: auto; padding: 20px; display: none;
+    flex-direction: column; gap: 16px;
+  }
+  .panel-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .panel-box h2 { font-size: 14px; margin: 0; font-weight: 600; }
+  .install-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .install-row input {
+    flex: 1; min-width: 180px; padding: 7px 10px; font-size: 13px; outline: none;
+  }
+  .install-row input:focus { border-color: var(--accent); }
+  #install-report { font-size: 12.5px; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+  .skill-card {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .skill-card.off { opacity: 0.6; }
+  .skill-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .skill-name { font-weight: 600; font-size: 14px; }
+  .skill-desc { color: var(--muted); font-size: 12.5px; }
+  .badge {
+    font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1px 6px;
+  }
+  .skill-actions { display: flex; gap: 8px; }
+  .skill-actions button { font-size: 12px; padding: 4px 10px; }
+  .skill-actions .danger:hover { border-color: var(--error); color: var(--error); }
+  .skill-card pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; font-size: 12px; margin: 0; max-height: 320px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .load-errors { color: var(--error); font-size: 12.5px; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -157,12 +196,35 @@
     <select id="provider-select" title="选择厂商">
       <option value="">默认厂商</option>
     </select>
+    <button id="market-btn" title="查看已装技能、安装新技能">技能市场</button>
     <button id="export-btn" title="导出对话记录为 Markdown（含任务轨迹与错误，可直接粘贴给 AI）">导出</button>
     <button id="clear-btn" title="清空服务端对话上下文并清屏">清空</button>
   </header>
 
   <div id="chat">
     <div class="msg assistant"><div class="bubble">你好！我是 multiagent，输入消息开始对话；输入 / 可快速点名技能。</div></div>
+  </div>
+
+  <div id="skills-view">
+    <div class="panel-box">
+      <h2>安装技能</h2>
+      <div class="install-row">
+        <select id="preset-select" title="预设平台源"><option value="">预设平台源…</option></select>
+        <input id="install-url" placeholder="Git 仓库地址（支持 anthropics/skills、skills.sh 等 SKILL.md 生态）">
+        <input id="install-sub" placeholder="子目录（可选）" style="max-width: 150px;">
+      </div>
+      <div class="install-row">
+        <input id="install-path" placeholder="本地目录（服务器侧路径）">
+        <button id="install-git-btn">从 Git 安装</button>
+        <button id="install-local-btn">本地导入</button>
+      </div>
+      <div id="install-report"></div>
+    </div>
+    <div class="panel-box">
+      <h2>已安装技能</h2>
+      <div class="load-errors" id="load-errors"></div>
+      <div id="skills-list"></div>
+    </div>
   </div>
 
   <footer>
@@ -180,8 +242,10 @@ const sendBtn = document.getElementById('send-btn');
 const taskBtn = document.getElementById('task-btn');
 const clearBtn = document.getElementById('clear-btn');
 const exportBtn = document.getElementById('export-btn');
+const marketBtn = document.getElementById('market-btn');
 const providerEl = document.getElementById('provider-select');
 const defaultHintEl = document.getElementById('default-hint');
+const skillsViewEl = document.getElementById('skills-view');
 const slashPopEl = document.getElementById('slash-pop');
 let busy = false;
 let toastTimer = null;
@@ -614,10 +678,180 @@ async function exportChat() {
   toast(copied ? '已导出 .md 文件，并已复制到剪贴板' : '已导出 .md 文件（剪贴板不可用，请直接粘贴文件内容）');
 }
 
+// ===== 技能市场 =====
+let marketLoaded = false;
+
+function showView(view) {
+  const market = view === 'market';
+  skillsViewEl.style.display = market ? 'flex' : 'none';
+  chatEl.style.display = market ? 'none' : 'flex';
+  document.querySelector('footer').style.display = market ? 'none' : 'flex';
+  marketBtn.textContent = market ? '返回聊天' : '技能市场';
+  if (market) loadMarket();
+  else inputEl.focus();
+}
+
+async function loadMarket() {
+  const [data] = await Promise.all([fetchSkills(true), loadPresets()]);
+  const listEl = document.getElementById('skills-list');
+  const errorsEl = document.getElementById('load-errors');
+  errorsEl.textContent = (data.load_errors || []).join('\n');
+  listEl.innerHTML = '';
+  if (!data.skills.length) {
+    const empty = document.createElement('div');
+    empty.className = 'skill-desc';
+    empty.textContent = '还没有技能：用上方安装，或让任务里的 Agent 调用 create_skill 自产。';
+    listEl.appendChild(empty);
+    return;
+  }
+  for (const s of data.skills) listEl.appendChild(skillCard(s));
+}
+
+function skillCard(s) {
+  const card = document.createElement('div');
+  card.className = 'skill-card' + (s.enabled ? '' : ' off');
+
+  const head = document.createElement('div');
+  head.className = 'skill-head';
+  const name = document.createElement('span');
+  name.className = 'skill-name';
+  name.textContent = s.name;
+  const desc = document.createElement('span');
+  desc.className = 'skill-desc';
+  desc.textContent = s.description;
+  const source = document.createElement('span');
+  source.className = 'badge';
+  source.textContent = s.source + (s.enabled ? '' : ' · 已禁用');
+  head.appendChild(name);
+  head.appendChild(desc);
+  head.appendChild(source);
+  card.appendChild(head);
+
+  if (s.tools.length) {
+    const tools = document.createElement('div');
+    tools.className = 'badge';
+    tools.textContent = '依赖工具: ' + s.tools.join('、');
+    card.appendChild(tools);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'skill-actions';
+  const viewBtn = document.createElement('button');
+  viewBtn.textContent = '查看';
+  const toggleBtn = document.createElement('button');
+  toggleBtn.textContent = s.enabled ? '禁用' : '启用';
+  const delBtn = document.createElement('button');
+  delBtn.className = 'danger';
+  delBtn.textContent = '删除';
+  actions.appendChild(viewBtn);
+  actions.appendChild(toggleBtn);
+  actions.appendChild(delBtn);
+  card.appendChild(actions);
+
+  const pre = document.createElement('pre');
+  pre.hidden = true;
+  card.appendChild(pre);
+
+  viewBtn.addEventListener('click', async () => {
+    if (!pre.hidden) { pre.hidden = true; return; }
+    try {
+      const res = await fetch('/skills/' + encodeURIComponent(s.name));
+      const data = await res.json();
+      pre.textContent = data.content || JSON.stringify(data);
+    } catch (e) {
+      pre.textContent = '加载失败：' + e.message;
+    }
+    pre.hidden = false;
+  });
+  toggleBtn.addEventListener('click', async () => {
+    const action = s.enabled ? 'disable' : 'enable';
+    try {
+      const res = await fetch('/skills/' + encodeURIComponent(s.name) + '/' + action, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      invalidateSkills();
+      await loadMarket();
+    } catch (e) { toast('操作失败：' + e.message); }
+  });
+  delBtn.addEventListener('click', async () => {
+    if (!confirm('删除技能「' + s.name + '」？（连同其技能包目录）')) return;
+    try {
+      const res = await fetch('/skills/' + encodeURIComponent(s.name), { method: 'DELETE' });
+      if (!res.ok) throw new Error(await res.text());
+      invalidateSkills();
+      await loadMarket();
+    } catch (e) { toast('删除失败：' + e.message); }
+  });
+  return card;
+}
+
+async function loadPresets() {
+  const select = document.getElementById('preset-select');
+  if (marketLoaded) return;
+  try {
+    const res = await fetch('/skills/presets');
+    const data = await res.json();
+    for (const p of data.presets) {
+      const opt = document.createElement('option');
+      opt.value = p.url;
+      opt.textContent = p.name + (p.note ? ' — ' + p.note : '');
+      opt.dataset.subpath = p.subpath || '';
+      select.appendChild(opt);
+    }
+  } catch (e) { /* 静默 */ }
+  marketLoaded = true;
+}
+
+function installReport(lines) {
+  document.getElementById('install-report').textContent = lines.join('\n');
+}
+
+async function installSkill(source) {
+  const body = { source };
+  body.subpath = document.getElementById('install-sub').value.trim();
+  if (source === 'git') body.url = document.getElementById('install-url').value.trim();
+  else body.path = document.getElementById('install-path').value.trim();
+  installReport(['安装中…（git 克隆视仓库大小需要几秒到几十秒）']);
+  try {
+    const res = await fetch('/skills/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = typeof (data && data.detail) === 'string' ? data.detail : 'HTTP ' + res.status;
+      installReport(['安装失败：' + detail]);
+      return;
+    }
+    const marks = { installed: '✓', skipped: '↷', invalid: '✗' };
+    installReport(
+      ['来源: ' + data.source].concat(
+        data.results.map((r) => (marks[r.status] || '·') + ' ' + r.name + (r.detail ? ' — ' + r.detail : ' — ' + r.status))
+      )
+    );
+    invalidateSkills();
+    await loadMarket();
+  } catch (e) {
+    installReport(['安装失败：' + e.message]);
+  }
+}
+
 sendBtn.addEventListener('click', send);
 taskBtn.addEventListener('click', runAgent);
 clearBtn.addEventListener('click', clearChat);
 exportBtn.addEventListener('click', exportChat);
+marketBtn.addEventListener('click', () => {
+  showView(skillsViewEl.style.display === 'flex' ? 'chat' : 'market');
+});
+document.getElementById('install-git-btn').addEventListener('click', () => installSkill('git'));
+document.getElementById('install-local-btn').addEventListener('click', () => installSkill('local'));
+document.getElementById('preset-select').addEventListener('change', (e) => {
+  const opt = e.target.selectedOptions[0];
+  if (opt && opt.value) {
+    document.getElementById('install-url').value = opt.value;
+    document.getElementById('install-sub').value = opt.dataset.subpath || '';
+  }
+});
 
 inputEl.addEventListener('keydown', (e) => {
   if (slashOpen()) {

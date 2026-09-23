@@ -186,6 +186,38 @@
     white-space: pre-wrap; word-break: break-word;
   }
   .load-errors { color: var(--error); font-size: 12.5px; white-space: pre-wrap; }
+
+  /* ===== 市场子面板与确认卡 ===== */
+  .sub-tabs { display: flex; gap: 8px; }
+  .sub-tab { padding: 6px 16px; }
+  .sub-tab.active { border-color: var(--accent); color: var(--accent); }
+  .badge.pass { color: #3ecf6f; border-color: #3ecf6f; }
+  .badge.warn { color: #e8b339; border-color: #e8b339; }
+  .badge.fail { color: var(--error); border-color: var(--error); }
+  .market-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 4px; border-bottom: 1px solid var(--border);
+  }
+  .market-row:last-child { border-bottom: none; }
+  .market-row .skill-name { flex: 0 0 auto; }
+  .market-row .skill-desc { flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #confirm-mask {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+    display: flex; align-items: center; justify-content: center; z-index: 30;
+  }
+  #confirm-mask[hidden] { display: none; }
+  .confirm-card {
+    width: min(560px, 92vw); max-height: 84vh; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 20px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .confirm-card h2 { font-size: 16px; margin: 0; }
+  .confirm-card pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; font-size: 12px; margin: 0; max-height: 320px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .confirm-card pre[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -206,24 +238,64 @@
   </div>
 
   <div id="skills-view">
-    <div class="panel-box">
-      <h2>安装技能</h2>
-      <div class="install-row">
-        <select id="preset-select" title="预设平台源"><option value="">预设平台源…</option></select>
-        <input id="install-url" placeholder="Git 仓库地址（支持 anthropics/skills、skills.sh 等 SKILL.md 生态）">
-        <input id="install-sub" placeholder="子目录（可选）" style="max-width: 150px;">
-      </div>
-      <div class="install-row">
-        <input id="install-path" placeholder="本地目录（服务器侧路径）">
-        <button id="install-git-btn">从 Git 安装</button>
-        <button id="install-local-btn">本地导入</button>
-      </div>
-      <div id="install-report"></div>
+    <div class="sub-tabs">
+      <button id="tab-installed" class="sub-tab active">已安装</button>
+      <button id="tab-online" class="sub-tab">在线浏览</button>
     </div>
-    <div class="panel-box">
-      <h2>已安装技能</h2>
-      <div class="load-errors" id="load-errors"></div>
-      <div id="skills-list"></div>
+    <div id="installed-panel">
+      <div class="panel-box">
+        <h2>安装技能（手动）</h2>
+        <div class="install-row">
+          <select id="preset-select" title="预设平台源"><option value="">预设平台源…</option></select>
+          <input id="install-url" placeholder="Git 仓库地址（支持 anthropics/skills、skills.sh 等 SKILL.md 生态）">
+          <input id="install-sub" placeholder="子目录（可选）" style="max-width: 150px;">
+        </div>
+        <div class="install-row">
+          <input id="install-path" placeholder="本地目录（服务器侧路径）">
+          <button id="install-git-btn">从 Git 安装</button>
+          <button id="install-local-btn">本地导入</button>
+        </div>
+        <div id="install-report"></div>
+      </div>
+      <div class="panel-box">
+        <h2>已安装技能</h2>
+        <div class="load-errors" id="load-errors"></div>
+        <div id="skills-list"></div>
+      </div>
+    </div>
+    <div id="online-panel" style="display:none">
+      <div class="panel-box">
+        <h2>在线目录 <span class="meta" id="market-freshness"></span></h2>
+        <div class="install-row">
+          <input id="market-q" placeholder="搜索名称 / 描述…">
+          <select id="market-source"><option value="">全部来源</option></select>
+          <button id="market-search-btn">搜索</button>
+          <button id="market-refresh-btn" title="立即爬取一次目录">刷新目录</button>
+        </div>
+        <div id="market-list"></div>
+        <div class="skill-actions">
+          <button id="market-prev">上一页</button>
+          <span class="meta" id="market-pageinfo"></span>
+          <button id="market-next">下一页</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm-mask" hidden>
+    <div class="confirm-card">
+      <h2 id="cf-name"></h2>
+      <div class="skill-head" id="cf-badges"></div>
+      <div class="skill-desc" id="cf-desc"></div>
+      <div class="badge" id="cf-origin"></div>
+      <div class="skill-actions">
+        <button id="cf-preview-btn">查看 SKILL.md</button>
+      </div>
+      <pre id="cf-preview" hidden></pre>
+      <div class="skill-actions" style="justify-content: flex-end;">
+        <button id="cf-cancel">取消</button>
+        <button id="cf-install">确认安装</button>
+      </div>
     </div>
   </div>
 
@@ -805,12 +877,16 @@ function installReport(lines) {
   document.getElementById('install-report').textContent = lines.join('\n');
 }
 
-async function installSkill(source) {
-  const body = { source };
-  body.subpath = document.getElementById('install-sub').value.trim();
-  if (source === 'git') body.url = document.getElementById('install-url').value.trim();
-  else body.path = document.getElementById('install-path').value.trim();
-  installReport(['安装中…（git 克隆视仓库大小需要几秒到几十秒）']);
+async function installSkill(source, extra) {
+  const body = Object.assign({ source }, extra || {});
+  if (source === 'git') {
+    body.url = document.getElementById('install-url').value.trim();
+    body.subpath = document.getElementById('install-sub').value.trim();
+  } else if (source === 'local') {
+    body.path = document.getElementById('install-path').value.trim();
+    body.subpath = document.getElementById('install-sub').value.trim();
+  }
+  installReport(['安装中…（目录包经爬取服务获取，只落 SKILL.md 纯提示词）']);
   try {
     const res = await fetch('/skills/install', {
       method: 'POST',
@@ -826,7 +902,8 @@ async function installSkill(source) {
     const marks = { installed: '✓', skipped: '↷', invalid: '✗' };
     installReport(
       ['来源: ' + data.source].concat(
-        data.results.map((r) => (marks[r.status] || '·') + ' ' + r.name + (r.detail ? ' — ' + r.detail : ' — ' + r.status))
+        data.results.map((r) => (marks[r.status] || '·') + ' ' + r.name + (r.detail ? ' — ' + r.detail : ' — ' + r.status)),
+        (data.warnings || []).map((w) => '⚠ ' + w)
       )
     );
     invalidateSkills();
@@ -834,6 +911,166 @@ async function installSkill(source) {
   } catch (e) {
     installReport(['安装失败：' + e.message]);
   }
+}
+
+// ===== 在线目录（爬取服务经 /market/* 代理；主服务零外网） =====
+const marketState = { q: '', source: '', page: 1, pageSize: 10 };
+let marketOnlineDisabled = false;
+let marketSourcesLoaded = false;
+let confirmEntry = null;
+
+function auditBadge(a) {
+  const el = document.createElement('span');
+  const status = a.status === 'pass' || a.status === 'warn' || a.status === 'fail' ? a.status : '';
+  el.className = 'badge' + (status ? ' ' + status : '');
+  el.textContent = a.provider + ': ' + (a.status || 'unknown') + (a.risk_level ? ' · ' + a.risk_level : '');
+  el.title = a.summary || '';
+  return el;
+}
+
+function showSubTab(which) {
+  const online = which === 'online';
+  document.getElementById('installed-panel').style.display = online ? 'none' : '';
+  document.getElementById('online-panel').style.display = online ? '' : 'none';
+  document.getElementById('tab-installed').classList.toggle('active', !online);
+  document.getElementById('tab-online').classList.toggle('active', online);
+  if (online) loadMarketOnline();
+}
+
+async function loadMarketSources() {
+  if (marketSourcesLoaded) return;
+  try {
+    const res = await fetch('/market/sources');
+    if (!res.ok) return;
+    const data = await res.json();
+    const select = document.getElementById('market-source');
+    for (const item of data.sources || []) {
+      const opt = document.createElement('option');
+      opt.value = item.source;
+      opt.textContent = item.source + (item.stale ? '（缓存）' : '');
+      select.appendChild(opt);
+    }
+  } catch (e) { /* 静默 */ }
+  marketSourcesLoaded = true;
+}
+
+async function loadMarketOnline() {
+  if (marketOnlineDisabled) return;
+  await loadMarketSources();
+  const params = new URLSearchParams({
+    q: marketState.q, source: marketState.source,
+    page: String(marketState.page), page_size: String(marketState.pageSize),
+  });
+  let data;
+  try {
+    const res = await fetch('/market/search?' + params);
+    if (res.status === 503) {
+      marketOnlineDisabled = true;
+      document.getElementById('tab-online').style.display = 'none';
+      showSubTab('installed');
+      toast('在线目录未启用（未配置 CATALOG_BASE_URL）');
+      return;
+    }
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.detail || ('HTTP ' + res.status));
+    data = payload;
+  } catch (e) {
+    document.getElementById('market-list').textContent = '';
+    const err = document.createElement('div');
+    err.className = 'load-errors';
+    err.textContent = '在线目录暂不可用：' + e.message;
+    document.getElementById('market-list').appendChild(err);
+    return;
+  }
+  renderMarketRows(data);
+  document.getElementById('market-freshness').textContent = data.refreshed_at
+    ? ('目录更新于 ' + new Date(data.refreshed_at).toLocaleString()) : '尚未爬取';
+  const pages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || marketState.pageSize)));
+  document.getElementById('market-pageinfo').textContent = '第 ' + data.page + ' / ' + pages + ' 页（共 ' + (data.total || 0) + ' 条）';
+}
+
+function renderMarketRows(data) {
+  const list = document.getElementById('market-list');
+  list.innerHTML = '';
+  if (!(data.items || []).length) {
+    const empty = document.createElement('div');
+    empty.className = 'skill-desc';
+    empty.textContent = '没有匹配的在线技能（换个关键词，或点「刷新目录」）。';
+    list.appendChild(empty);
+    return;
+  }
+  for (const item of data.items) {
+    const row = document.createElement('div');
+    row.className = 'market-row';
+    const name = document.createElement('span');
+    name.className = 'skill-name';
+    name.textContent = item.name;
+    const source = document.createElement('span');
+    source.className = 'badge';
+    source.textContent = item.source + ' · ' + (item.installs || 0) + ' 安装' + (item.validated ? ' · 已验证' : '');
+    row.appendChild(name);
+    row.appendChild(source);
+    if (item.is_duplicate) {
+      const dup = document.createElement('span');
+      dup.className = 'badge warn';
+      dup.textContent = '疑似重复';
+      row.appendChild(dup);
+    }
+    for (const a of (item.audits || [])) row.appendChild(auditBadge(a));
+    const desc = document.createElement('span');
+    desc.className = 'skill-desc';
+    desc.textContent = item.description || item.origin || '';
+    row.appendChild(desc);
+    const installBtn = document.createElement('button');
+    installBtn.textContent = '安装';
+    installBtn.addEventListener('click', () => openConfirm(item));
+    row.appendChild(installBtn);
+    list.appendChild(row);
+  }
+}
+
+function openConfirm(item) {
+  confirmEntry = item;
+  document.getElementById('cf-name').textContent = item.name;
+  document.getElementById('cf-desc').textContent = item.description || '（暂无描述，以 SKILL.md 预览为准）';
+  document.getElementById('cf-origin').textContent = '来源: ' + item.source + ' · ' + (item.origin || item.id);
+  const badges = document.getElementById('cf-badges');
+  badges.innerHTML = '';
+  const stat = document.createElement('span');
+  stat.className = 'badge';
+  stat.textContent = (item.installs || 0) + ' 安装' + (item.stars ? ' · ★' + item.stars : '') + (item.validated ? ' · 已验证' : '');
+  badges.appendChild(stat);
+  for (const a of (item.audits || [])) badges.appendChild(auditBadge(a));
+  const preview = document.getElementById('cf-preview');
+  preview.hidden = true;
+  preview.textContent = '';
+  document.getElementById('confirm-mask').hidden = false;
+}
+
+async function previewSkillMd() {
+  if (!confirmEntry) return;
+  const pre = document.getElementById('cf-preview');
+  pre.hidden = false;
+  pre.textContent = '预览加载中…（目录包经爬取服务获取）';
+  try {
+    const params = new URLSearchParams({ id: confirmEntry.install_ref || confirmEntry.id, source: confirmEntry.source });
+    const res = await fetch('/market/detail?' + params);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+    pre.textContent = data.skill_md || '（无内容）';
+    for (const a of (data.audits || [])) document.getElementById('cf-badges').appendChild(auditBadge(a));
+  } catch (e) {
+    pre.textContent = '预览不可用：' + e.message;
+  }
+}
+
+async function confirmInstall() {
+  if (!confirmEntry) return;
+  const entry = confirmEntry;
+  confirmEntry = null;
+  document.getElementById('confirm-mask').hidden = true;
+  showSubTab('installed');
+  await installSkill('catalog', { catalog_id: entry.install_ref || entry.id, source_platform: entry.source });
 }
 
 sendBtn.addEventListener('click', send);
@@ -852,6 +1089,48 @@ document.getElementById('preset-select').addEventListener('change', (e) => {
     document.getElementById('install-sub').value = opt.dataset.subpath || '';
   }
 });
+document.getElementById('tab-installed').addEventListener('click', () => showSubTab('installed'));
+document.getElementById('tab-online').addEventListener('click', () => showSubTab('online'));
+document.getElementById('market-search-btn').addEventListener('click', () => {
+  marketState.q = document.getElementById('market-q').value.trim();
+  marketState.page = 1;
+  loadMarketOnline();
+});
+document.getElementById('market-q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    marketState.q = e.target.value.trim();
+    marketState.page = 1;
+    loadMarketOnline();
+  }
+});
+document.getElementById('market-source').addEventListener('change', (e) => {
+  marketState.source = e.target.value;
+  marketState.page = 1;
+  loadMarketOnline();
+});
+document.getElementById('market-prev').addEventListener('click', () => {
+  if (marketState.page > 1) { marketState.page -= 1; loadMarketOnline(); }
+});
+document.getElementById('market-next').addEventListener('click', () => {
+  marketState.page += 1;
+  loadMarketOnline();
+});
+document.getElementById('market-refresh-btn').addEventListener('click', async () => {
+  try {
+    await fetch('/market/refresh', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+  } catch (e) { /* loadMarketOnline 会给出不可用提示 */ }
+  marketState.page = 1;
+  loadMarketOnline();
+});
+document.getElementById('cf-preview-btn').addEventListener('click', previewSkillMd);
+document.getElementById('cf-cancel').addEventListener('click', () => {
+  document.getElementById('confirm-mask').hidden = true;
+  confirmEntry = null;
+});
+document.getElementById('cf-install').addEventListener('click', confirmInstall);
 
 inputEl.addEventListener('keydown', (e) => {
   if (slashOpen()) {

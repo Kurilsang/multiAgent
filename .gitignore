@@ -11,6 +11,9 @@ venv/
 # 技能在线目录爬取服务的本地缓存库（含平台凭证，不入库）
 services/catalog/catalog.db
 
+# 技能启停状态（部署本地状态，机器写入）
+skills/.installed.json
+
 # Tooling
 .pytest_cache/
 .mypy_cache/

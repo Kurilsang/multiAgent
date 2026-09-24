@@ -11,6 +11,8 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
+Windows/PowerShell 提示：含 `@` 的参数要加引号（如 `--add-assignee "@me"`），否则 PowerShell 把 `@me` 当 splatting 吞掉；中文 issue body 一律 `--body-file`。
+
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
 Specs are double-published: the full spec body goes into the GitHub issue **and** into `docs/specs/NNNN-<name>.md` (the durable design docs referenced by AGENTS.md). Keep both identical.

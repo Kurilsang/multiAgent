@@ -1,6 +1,6 @@
 # multiagent
 
-针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入进行中（连接定义 + 启动装配 + 观察值续读已落地）。
+针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡）。
 
 ## 特性
 
@@ -9,7 +9,8 @@
 - **Agent 任务**：`/agent` 发起自主多步任务——状态机编排（见 docs/adr/0001）、双层终止（见 docs/adr/0002）、死循环止损、partial 进展摘要
 - **工具 + 技能**：工具走 function calling 通道；技能为文件化提示词包（`skills/<名称>/SKILL.md`），动态清单 + `use_skill` 按需激活，Agent 可用 `create_skill` 自产技能
 - **技能市场**：预设平台 / Git URL / 本地目录安装（覆盖 anthropics/skills、skills.sh 等 SKILL.md 生态），WebUI 管理启停/删除/查看，热生效无需重启
-- **技能在线目录**：独立爬取服务（`services/catalog/`，隔离区）抓取 skills.sh / LobeHub 目录——SQLite 缓存 + 定时刷新 + 陈旧标注；市场页「在线浏览」搜索翻页 → 单次确认卡（SKILL.md 预览 + Socket/Snyk 等审计徽标）→ 一键安装；主服务不直接外网抓目录（MCP 运行时连接按用户显式配置直连，见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）
+- **技能在线目录**：独立爬取服务（`services/catalog/`，隔离区）抓取 skills.sh / LobeHub / 官方 MCP Registry 目录——SQLite 缓存 + 定时刷新 + 陈旧标注；市场页「在线浏览」搜索翻页（技能 / MCP 按资产类型过滤）→ 单次确认卡（manifest 预览 + 审计徽标）→ 一键安装；外网元数据交互集中在隔离区（可独立部署升级），MCP 会话流量由主服务直连远程端点（见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）
+- **MCP 市场与 MCP 工具**：MCP 服务安装为声明式连接定义（`mcp/servers.json`，密钥只以 `${VAR}` 占位写入 `.env`，手写同权、重载生效）；确认卡展示命令原文/endpoint + 域名 + 密钥表单（isSecret 走密码框），单次确认即安装并收集密钥；启用服务的工具以 `mcp__<服务短名>__<工具名>` 灌入工具注册表，聊天/任务两通道即装即用；观察值视图截断 + `read_tool_result` 旁存续读
 - **双通道调用**：任务通道全量工具 + 自主激活；聊天通道注入清单、模型自主判断是否借助技能；`/技能名 …` 显式点名确定性升级为任务
 - **运行时切换**：CLI 中 `/model glm` 随时切换厂商；API 请求中传 `provider` 字段
 - **思考链展示**：`reasoning_content` 字段（GLM / DeepSeek 思考模型）与内联 `<think>` 标签（MiniMax M 系列）统一转写，WebUI / CLI / 任务时间线均实时展示，不污染对话历史
@@ -105,10 +106,24 @@ curl -X POST http://127.0.0.1:8000/skills/install \
   -d '{"source": "local", "path": "D:/skills-source"}'
 
 # 在线目录（爬取服务代理；CATALOG_BASE_URL 未配置时返回 503）
-curl "http://127.0.0.1:8000/market/search?q=pdf&page=1&page_size=10"
+curl "http://127.0.0.1:8000/market/search?q=pdf&kind=skill&page=1&page_size=10"   # kind=skill|mcp 按资产类型过滤
 curl http://127.0.0.1:8000/market/sources
 curl "http://127.0.0.1:8000/market/detail?id=owner/repo/skill&source=skills-sh"
 curl -X POST http://127.0.0.1:8000/market/refresh -H "Content-Type: application/json" -d '{}'
+
+# MCP 管理（连接定义 = mcp/servers.json，改动可经重载生效；工具即装即用）
+curl http://127.0.0.1:8000/mcp                          # 服务列表（状态 + 工具 + 加载错误；值脱敏）
+curl -X POST http://127.0.0.1:8000/mcp/enable  -H "Content-Type: application/json" -d '{"name": "io.github.acme/filesystem"}'
+curl -X POST http://127.0.0.1:8000/mcp/disable -H "Content-Type: application/json" -d '{"name": "io.github.acme/filesystem"}'
+curl -X POST http://127.0.0.1:8000/mcp/remove  -H "Content-Type: application/json" -d '{"name": "io.github.acme/filesystem"}'
+curl -X POST http://127.0.0.1:8000/mcp/reload                          # 手改连接定义文件后重载重连
+# 安装 MCP：目录条目（env_values 为密钥值，只入 .env）/ 本地 server.json、mcp.json 导入
+curl -X POST http://127.0.0.1:8000/mcp/install \
+  -H "Content-Type: application/json" \
+  -d '{"source": "catalog", "catalog_id": "io.github.acme/filesystem", "source_platform": "mcp-registry", "env_values": {"ACME_TOKEN": "..."}}'
+curl -X POST http://127.0.0.1:8000/mcp/install \
+  -H "Content-Type: application/json" \
+  -d '{"source": "local", "path": "D:/mcp-import/servers.json"}'
 
 # 导出主对话历史（?format=json 可选，默认 markdown）
 curl http://127.0.0.1:8000/export
@@ -131,25 +146,27 @@ app/
 ├── conversation.py  # 主对话历史管理与截断
 ├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、动态技能清单/预激活
 ├── skills.py        # 技能注册表：SKILL.md 解析/校验/自产、启停状态、安装器（Git/本地）
+├── mcp.py           # MCP 连接定义模型 + 运行时管理器（client factory 测试缝、stdio/streamable-http 会话）
+├── observation.py   # 观察值视图 + 旁存续读（内存句柄池 LRU、read_tool_result 元工具）
 ├── tools.py         # 工具注册表 + 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）
 ├── export.py        # 对话导出格式化（markdown / json 纯函数）
 ├── cli.py           # 终端入口（/chat 流式 + /agent 任务 + /export 导出）
-├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/skills、/market、/export）
+├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/skills*、/mcp*、/market、/export）
 └── static/
-    └── index.html   # WebUI（聊天流式 + 任务时间线 + / 技能弹层 + 技能市场：已安装/在线浏览 + 确认卡，无框架，单文件）
+    └── index.html   # WebUI（聊天流式 + 任务时间线 + / 技能弹层 + 统一市场：技能/MCP 双类资产已安装/在线浏览 + 单次确认卡，无框架，单文件）
 services/
-└── catalog/         # 技能在线目录爬取服务（独立进程，隔离区 = 唯一外网面）
+└── catalog/         # 在线目录爬取服务（独立进程，隔离区 = 唯一外网元数据交互点）
     ├── app.py       # /internal/* 窄合同 + /health
     ├── schema.py    # 统一条目/目录包 schema + 不可信输入清洗
     ├── store.py     # SQLite 缓存 + 源状态 + 平台凭证仓
     ├── refresher.py # 一次爬取 + 后台定时刷新（降级读缓存）
-    ├── sources/     # 平台适配器（skills.sh HTML 降级 / LobeHub M2M API）
+    ├── sources/     # 平台适配器（skills.sh HTML 降级 / LobeHub M2M API / 官方 MCP Registry）
     └── README.md    # ⚠ 隔离边界与独立部署升级路径
 skills/
 └── 时间报告/
     └── SKILL.md     # 内置演示技能包（其余技能经市场安装或 Agent create_skill 自产）
 tests/
-├── fakes.py             # 预约定测试缝隙（LLM fake + 目录源/HTTP fake）
+├── fakes.py             # 预约定测试缝隙（LLM fake + MCP 会话 fake + 目录源/HTTP fake）
 ├── test_config.py
 ├── test_conversation.py
 ├── test_tools.py
@@ -158,9 +175,15 @@ tests/
 ├── test_agent.py
 ├── test_skills.py       # 技能注册表、元工具与安装器
 ├── test_skills_api.py   # 技能管理 HTTP API
+├── test_mcp.py          # 连接定义模型 + 运行时管理器（fake client factory）
+├── test_mcp_api.py      # MCP 管理面 HTTP API
+├── test_mcp_anchor.py   # 真协议锚点（官方 SDK stdio 跑通 echo server）
+├── test_observation.py  # 观察值视图与旁存续读
 ├── test_catalog_schema.py  # 目录 schema 与清洗
 ├── test_catalog_app.py     # 爬取服务 HTTP 面
+├── test_catalog_http.py    # 标准库 HTTP 客户端（本地实测，回归锚）
 ├── test_catalog_sources.py # 平台适配器（fixture 驱动）
+├── test_catalog_mcp_registry.py # 官方 MCP Registry 适配器（fixture 驱动）
 ├── test_catalog_store.py   # SQLite 缓存 / 凭证仓 / 刷新器
 ├── test_catalog_pack.py    # 目录包获取（git 坐标 / ZIP + zip-slip 防护）
 ├── test_market_api.py      # 主服务 /market/* 代理与目录包安装
@@ -174,7 +197,7 @@ tests/
 
 见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）；`AGENT_MAX_ITERATIONS` 控制 Agent 任务的最大思考轮数（最小 1，超过则以 partial 进展摘要收尾）。
 
-技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）；`CATALOG_BASE_URL` 指向技能在线目录爬取服务（默认 `http://127.0.0.1:8100`，留空则关闭在线目录并隐藏入口）。爬取服务自身配置（`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` / `CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`）见 [services/catalog/README.md](services/catalog/README.md)。
+技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）；`CATALOG_BASE_URL` 指向技能在线目录爬取服务（默认 `http://127.0.0.1:8100`，留空则关闭在线目录并隐藏入口）；`CATALOG_AUTOSTART` 控制主服务是否自动托管本机爬取服务（默认开，外部部署/自行管理时置 0）。爬取服务自身配置（`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` / `CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`）见 [services/catalog/README.md](services/catalog/README.md)。
 
 MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）。
 
@@ -203,7 +226,7 @@ python -m unittest discover tests -v
 
 - 单会话内存上下文：服务重启后历史与任务轨迹清空；接口内部已加锁串行化，适合单用户/低并发使用
 - Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
-- MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；mcpb 单文件包条目暂不支持安装（后续扩展点）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令
+- MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；mcpb 单文件包条目暂不支持安装（后续扩展点）；官方 MCP Registry 处于 preview 阶段（schema 可能变更），目录为全量拉取（updated_since 真增量未做）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令（确认卡已披露命令原文）
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
 - SSE 断连后任务不恢复，页面重开需重新发起
@@ -211,7 +234,7 @@ python -m unittest discover tests -v
 ## 后续规划
 
 - 多 Agent 协作（评审者/执行者分工，复用状态机引擎）
-- MCP 市场剩余票：WebUI 统一市场与 MCP 单次确认卡、最终文档收口（#38/#39）；后续扩展：mcpb 单文件包下载安装、ClawHub 适配器
+- MCP 市场后续扩展：mcpb 单文件包下载安装、ClawHub 适配器、已验证源免确认白名单；`/` 技能弹层混入在线目录
 - 技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub API）、zip 上传、版本与更新检查
 - 多会话管理与持久化
 - 网关特化逻辑（路由、鉴权、审计）

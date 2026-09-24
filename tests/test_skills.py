@@ -18,6 +18,7 @@ from app.skills import (
     catalog_section,
     install_from_dir,
     install_from_git,
+    parse_external_skill,
     parse_skill_md,
     render_skill_md,
 )
@@ -321,6 +322,34 @@ class GitInstallTest(unittest.TestCase):
         with self.assertRaises(SkillError) as ctx:
             install_from_git(self.registry, str(self.root / "no-such-repo"))
         self.assertIn("git 克隆失败", str(ctx.exception))
+
+
+class ExternalSkillParseTest(unittest.TestCase):
+    """第三方包「清洗不拒绝」：生态包长描述/带空格名不该被自家格式拒装。"""
+
+    def test_sanitizes_name_and_truncates_description_and_guide(self):
+        text = (
+            "---\nname: Next.js Development\ndescription: " + "描述" * 100 + "\n"
+            "allowed-tools: Read\ntools: []\n---\n\n" + "正文" * 6000 + "\n"
+        )
+        skill = parse_external_skill(text)
+        self.assertEqual(skill.name, "Next-js-Development")  # 可作 /前缀点名
+        self.assertEqual(len(skill.description), 100)  # 截到清单预算而非拒绝
+        self.assertLessEqual(len(skill.guide), MAX_GUIDE_CHARS)
+        self.assertTrue(skill.guide.endswith("…"))
+        self.assertEqual(skill.tools, ())
+
+    def test_user_case_long_description_installs(self):
+        text = "---\nname: find-skills\ndescription: " + "x" * 200 + "\ntools: []\n---\n\n正文。\n"
+        skill = parse_external_skill(text)
+        self.assertEqual(skill.name, "find-skills")
+        self.assertEqual(len(skill.description), 100)
+
+    def test_rejects_only_when_name_or_body_unusable(self):
+        with self.assertRaises(SkillError):
+            parse_external_skill("---\nname: ***\ndescription: d\ntools: []\n---\n\n正文\n")
+        with self.assertRaises(SkillError):
+            parse_external_skill("---\nname: ok\ndescription: d\ntools: []\n---\n\n   \n")
 
 
 if __name__ == "__main__":

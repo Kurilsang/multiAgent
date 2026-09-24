@@ -164,12 +164,16 @@ def render_skill_md(skill: Skill) -> str:
 
 
 def parse_external_skill(text: str) -> Skill:
-    """第三方技能包（目录市场）宽松解析：仅取 name/description/正文。
+    """第三方技能包（目录市场）宽松解析：清洗不拒绝，仅缺关键项才拒绝。
 
-    与自有技能的严格解析不同：frontmatter 未知字段（生态常见的
-    allowed-tools 等）**一律丢弃而非拒绝**——字段值根本不进上下文，注入
-    面不变；外部工具名与本工具注册表不通，工具依赖留空（用户可在包内补
-    tools 声明）。name/description/正文仍走 validate_pack 同一套上限。
+    与自有技能的严格解析不同（实现裁定，见 SPEC-0002 信任边界）：
+    - frontmatter 未知字段（生态常见的 allowed-tools 等）一律丢弃——
+      字段值不进上下文，注入面不变；外部工具名与本注册表不通，工具依赖留空
+    - 长度/命名超标**清洗而非拒绝**：name 规范化为合法技能名（可作 /前缀
+      点名），description 截到清单预算，正文截断并以 … 标注——进上下文的
+      永远是清洗后的值。生态包（如 anthropics/skills）普遍长描述、带空格
+      名，按自家格式拒装是错误判定
+    - 仅两种情况拒绝：清洗后 name 为空、正文为空
     """
     match = re.match(r"^\s*---\s*\n(.*?)\n---\s*\n?", text or "", re.S)
     head = match.group(1) if match else ""
@@ -180,16 +184,20 @@ def parse_external_skill(text: str) -> Skill:
         key, value = raw.split(":", 1)
         key = key.strip()
         if key in fields and not fields[key]:
-            fields[key] = value.strip()[:200]
-    body = text[match.end() :].strip("\n") if match else (text or "").strip("\n")
-    skill = Skill(
-        name=fields["name"].strip(),
-        description=fields["description"],
-        guide=body,
+            fields[key] = value.strip()
+    body = (text[match.end() :].strip("\n") if match else (text or "").strip("\n"))
+    name = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", fields["name"]).strip("-")[:32]
+    if not name:
+        raise SkillError("第三方技能包缺少可用的 name（清洗后为空）")
+    if not body.strip():
+        raise SkillError(f"技能 {name} 的正文为空")
+    guide = body if len(body) <= MAX_GUIDE_CHARS else body[: MAX_GUIDE_CHARS - 1] + "…"
+    return Skill(
+        name=name,
+        description=fields["description"][:MAX_DESCRIPTION_CHARS],
+        guide=guide,
         tools=(),
     )
-    validate_pack(skill.name, skill.description, skill.guide, skill.tools, set())
-    return skill
 
 
 def resolve_skills_dir(directory: str, project_root: Path) -> Path:

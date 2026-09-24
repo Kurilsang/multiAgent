@@ -166,7 +166,7 @@ class MarketApiTest(unittest.TestCase):
         )
         results = resp.json()["results"]
         self.assertEqual(results[0]["status"], "invalid")
-        self.assertIn("frontmatter", results[0]["detail"])
+        self.assertIn("缺少可用的 name", results[0]["detail"])
 
     def test_real_catalog_client_is_stdlib_only(self):
         """真实传输层可构造——回归锚：曾因未声明的 httpx 依赖在运行时炸。
@@ -177,6 +177,32 @@ class MarketApiTest(unittest.TestCase):
         client = server._catalog_client()
         self.assertTrue(hasattr(client, "request"))
         self.assertEqual(client._base, "http://catalog.test")
+
+    def test_install_from_catalog_sanitizes_instead_of_rejecting(self):
+        """用户实测案例：description 200 字（> 自家 100 上限）应清洗截断后装上。"""
+        pack = {
+            "files": [
+                {
+                    "path": "SKILL.md",
+                    "contents": (
+                        "---\nname: Next.js Development\ndescription: " + "描述" * 100 + "\n"
+                        "allowed-tools: Read\ntools: []\n---\n\n正文。\n"
+                    ),
+                }
+            ],
+            "extra_files": [],
+            "source": "skills-sh",
+        }
+        server._catalog_client = lambda: FakeCatalogHttp({"/internal/pack": FakeCatalogResponse(pack)})
+        resp = self.client.post(
+            "/skills/install",
+            json={"source": "catalog", "catalog_id": "a/b/c", "source_platform": "skills-sh"},
+        )
+        results = resp.json()["results"]
+        self.assertEqual(results[0]["status"], "installed")
+        self.assertEqual(results[0]["name"], "Next-js-Development")
+        entry = self.client.get("/skills/Next-js-Development").json()
+        self.assertEqual(len(entry["description"]), 100)
 
     def test_install_requires_catalog_id(self):
         server._catalog_client = lambda: FakeCatalogHttp()

@@ -66,6 +66,7 @@ class MarketApiTest(unittest.TestCase):
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
             server._catalog_client,
         )
         server.settings = StubSettings()
@@ -76,6 +77,7 @@ class MarketApiTest(unittest.TestCase):
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
         ) = server._build_wiring(Path(self._tmp.name))
         self.client = TestClient(server.app)
 
@@ -87,6 +89,7 @@ class MarketApiTest(unittest.TestCase):
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
             server._catalog_client,
         ) = self._orig
         self._tmp.cleanup()

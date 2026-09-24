@@ -82,6 +82,51 @@ def make_registry(name="echo", result="ok", error=None) -> ToolRegistry:
     return registry
 
 
+# ---- MCP 连接（app/mcp）测试替身：client factory 注入缝 ----
+
+
+class FakeMcpSession:
+    """脚本化 MCP 会话：tools/list 预设工具表、tools/call 按脚本返回/抛错。"""
+
+    def __init__(self, tools=(), results=None, error=None):
+        self.tools = list(tools)
+        self.results = dict(results or {})
+        self.error = error
+        self.calls: list[tuple[str, dict]] = []
+        self.closed = False
+
+    def list_tools(self):
+        if self.error is not None:
+            raise self.error
+        return [dict(item) for item in self.tools]
+
+    def call_tool(self, name, arguments):
+        self.calls.append((name, dict(arguments)))
+        if self.error is not None:
+            raise self.error
+        result = self.results.get(name, "ok")
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def close(self):
+        self.closed = True
+
+
+def make_mcp_tool(name="read_file", description="读文件", parameters=None):
+    """构造 tools/list 形态的工具元数据。"""
+    return {
+        "name": name,
+        "description": description,
+        "parameters": parameters
+        or {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    }
+
+
 # ---- 技能在线目录（services/catalog）测试替身 ----
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "catalog"

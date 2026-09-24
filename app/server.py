@@ -15,6 +15,7 @@
                           显式点名技能，确定性升级为任务通道（预激活）
     POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
     GET  /skills          已装技能列表（元数据 + 启停状态 + 启动加载错误）
+    GET  /mcp             MCP 连接定义列表（状态 + 工具 + 加载错误）
     GET  /skills/presets  预设平台源清单（一键安装用）
     GET  /skills/{name}   技能详情（含 SKILL.md 原文）
     POST /skills/{name}/enable     启用技能
@@ -62,6 +63,12 @@ from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_targ
 from .conversation import Conversation
 from .export import to_json, to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
+from .mcp import (
+    McpManager,
+    load_servers,
+    resolve_config_path,
+    sdk_client_factory,
+)
 from .skills import (
     PRESET_SOURCES,
     SkillEntry,
@@ -82,14 +89,30 @@ conversation = Conversation(
 )
 
 
-def _build_wiring(skills_dir: Path):
-    """构建工具/技能注册表与 Agent 引擎（测试可换技能目录重建整套）。
+def _build_wiring(
+    skills_dir: Path,
+    mcp_config: Path | None = None,
+    mcp_client_factory=None,
+):
+    """构建工具/技能/MCP 注册表与 Agent 引擎（测试可换技能目录重建整套）。
 
-    技能元工具先注册（create_skill 的校验基准含元工具），再热加载技能包。
+    技能元工具先注册（create_skill 的校验基准含元工具），随后 MCP 连接建连、
+    工具以 mcp__* 灌入注册表（技能包可声明其为依赖），最后热加载技能包。
+    mcp_config 缺省为 None = 不加载任何 MCP 条目（测试保持封闭）。
     """
     tools = default_registry()
     skills = SkillRegistry(skills_dir, tools=tools)
     for tool in skill_tools(skills):
+        tools.register(tool)
+    servers, mcp_parse_errors = load_servers(path=mcp_config)
+    mcp = McpManager(
+        servers,
+        client_factory=mcp_client_factory or sdk_client_factory,
+        max_tools=settings.mcp_max_tools,
+    )
+    mcp.load_errors.extend(mcp_parse_errors)
+    mcp.connect(reserved=tools.names())
+    for tool in mcp.build_tools():
         tools.register(tool)
     errors = skills.reload()
     engine = AgentEngine(
@@ -99,12 +122,17 @@ def _build_wiring(skills_dir: Path):
         skills=skills,
         catalog_max=settings.skills_catalog_max,
     )
-    return tools, skills, errors, engine
+    return tools, skills, errors, engine, mcp
 
 
-tool_registry, skill_registry, skill_load_errors, agent_engine = _build_wiring(
-    resolve_skills_dir(settings.skills_dir, PROJECT_ROOT)
+tool_registry, skill_registry, skill_load_errors, agent_engine, mcp_manager = (
+    _build_wiring(
+        resolve_skills_dir(settings.skills_dir, PROJECT_ROOT),
+        mcp_config=resolve_config_path(settings.mcp_config, PROJECT_ROOT),
+        mcp_client_factory=sdk_client_factory,
+    )
 )
+atexit.register(mcp_manager.close)
 
 # 单会话范围：串行化对话轮次，避免并发 /chat 互相污染同一份历史
 _chat_lock = threading.Lock()
@@ -463,6 +491,17 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+# ---- MCP 管理面 ----
+
+
+@app.get("/mcp")
+def list_mcp() -> dict:
+    return {
+        "servers": mcp_manager.listing(),
+        "load_errors": list(mcp_manager.load_errors),
+    }
 
 
 # ---- 技能管理面 ----

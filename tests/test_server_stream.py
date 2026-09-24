@@ -57,6 +57,7 @@ class StubSettings:
     skills_catalog_max = 30
     chat_max_tool_turns = 4
     catalog_base_url = "http://catalog.test"
+    mcp_max_tools = 64
 
     def api_key_for(self, provider: str) -> str:
         return "test-key"
@@ -239,6 +240,7 @@ class WiringSwapMixin:
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
         )
         server.settings = StubSettings()
         server.conversation.reset()
@@ -249,6 +251,7 @@ class WiringSwapMixin:
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
         ) = server._build_wiring(Path(self._tmp.name))
         self.client = TestClient(server.app)
 
@@ -261,6 +264,7 @@ class WiringSwapMixin:
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
         ) = self._orig
         self._tmp.cleanup()
 

@@ -19,6 +19,7 @@ class SkillsApiTest(unittest.TestCase):
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
         )
         server.settings = StubSettings()
         server.conversation.reset()
@@ -29,6 +30,7 @@ class SkillsApiTest(unittest.TestCase):
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
         ) = server._build_wiring(self.root)
         server.skill_registry.create("时间报告", "日期推算", "先取时间", ("calculator",))
         self.client = TestClient(server.app)
@@ -41,6 +43,7 @@ class SkillsApiTest(unittest.TestCase):
             server.skill_registry,
             server.skill_load_errors,
             server.agent_engine,
+            server.mcp_manager,
         ) = self._orig
         self._tmp.cleanup()
 

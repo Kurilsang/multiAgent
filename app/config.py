@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     skills_dir: str = "skills"
     skills_catalog_max: int = Field(default=30, ge=1)
 
+    # MCP 连接定义文件（相对项目根）；MCP 工具总数上限（超限装配期 fail loud，0 = 不限）
+    mcp_config: str = "mcp/servers.json"
+    mcp_max_tools: int = Field(default=64, ge=0)
+
     # 聊天通道迷你工具循环上限（技能激活与依赖工具调用的轮数）
     chat_max_tool_turns: int = Field(default=4, ge=1)
 

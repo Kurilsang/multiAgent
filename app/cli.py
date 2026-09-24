@@ -15,6 +15,7 @@
 """
 
 import argparse
+import atexit
 import json
 import sys
 from datetime import datetime
@@ -23,6 +24,8 @@ from pathlib import Path
 from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
+
+from .mcp import McpManager, load_servers, resolve_config_path, sdk_client_factory
 
 from .agent import (
     OBSERVATION_PREVIEW_CHARS,
@@ -210,6 +213,20 @@ def main() -> int:
     )
     for tool in skill_tools(skill_registry):
         tool_registry.register(tool)
+    # MCP 连接定义：建连并以 mcp__* 灌入注册表（技能包可声明其为依赖），再热加载技能包
+    mcp_servers, mcp_parse_errors = load_servers(
+        path=resolve_config_path(settings.mcp_config, PROJECT_ROOT)
+    )
+    mcp = McpManager(
+        mcp_servers,
+        client_factory=sdk_client_factory,
+        max_tools=settings.mcp_max_tools,
+    )
+    for error in [*mcp_parse_errors, *mcp.connect(reserved=tool_registry.names())]:
+        console.print(f"[yellow]MCP 加载警告：{escape(error)}[/yellow]")
+    for tool in mcp.build_tools():
+        tool_registry.register(tool)
+    atexit.register(mcp.close)
     for error in skill_registry.reload():
         console.print(f"[yellow]技能加载警告：{escape(error)}[/yellow]")
     agent = AgentEngine(

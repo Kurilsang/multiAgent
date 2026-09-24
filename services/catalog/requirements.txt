@@ -1,4 +1,4 @@
 # 技能在线目录爬取服务（独立进程依赖，不回流主工程 requirements.txt）
+# HTTP 传输用标准库（见 stdlib_http.py），此处只有 Web 框架依赖
 fastapi
 uvicorn
-httpx

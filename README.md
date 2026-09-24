@@ -29,9 +29,11 @@ pip install -r requirements.txt
 copy .env.example .env        # 编辑 .env，填入你实际使用的厂商 Key
 
 # 3a. WebUI（浏览器访问 http://127.0.0.1:8000）
+#     在线目录默认自动托管：主服务启动时探活失败会自行拉起爬取服务（独立子进程），
+#     一条命令即可；外部部署或自行管理爬取服务时设 CATALOG_AUTOSTART=0
 python -m app.server
 
-# 3b. 技能在线目录爬取服务（可选，独立进程；不启动则在线目录入口自动隐藏）
+# 3b. 技能在线目录爬取服务（独立进程，可选单独启动；独立依赖）
 pip install -r services/catalog/requirements.txt
 python -m services.catalog          # 默认 127.0.0.1:8100
 

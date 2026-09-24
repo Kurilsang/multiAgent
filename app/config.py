@@ -63,6 +63,9 @@ class Settings(BaseSettings):
 
     # 技能在线目录爬取服务地址（留空 = 关闭在线目录功能并隐藏入口）
     catalog_base_url: str = "http://127.0.0.1:8100"
+    # 本机爬取服务托管：探活失败时自动拉起子进程（独立进程语义不变）；
+    # 外部部署/自行管理时置 0
+    catalog_autostart: bool = True
 
     max_context_messages: int = Field(default=20, ge=2)
 

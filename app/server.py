@@ -30,7 +30,10 @@
     POST /reset           清空对话上下文
 """
 
+import atexit
 import json
+import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -600,6 +603,40 @@ def _catalog_client():
     return _UrllibCatalogClient(settings.catalog_base_url.strip())
 
 
+def _catalog_reachable(timeout: float = 2.0) -> bool:
+    try:
+        response = _UrllibCatalogClient(
+            settings.catalog_base_url.strip(), timeout=timeout
+        ).request("GET", "/health")
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def _ensure_catalog_service() -> None:
+    """托管本机爬取服务：探活失败且允许自启时拉起子进程。
+
+    独立进程语义不变（隔离边界 / 独立部署升级路径照旧）——只是省掉手动
+    开第二个终端；已在跑（含外部实例）直接复用，CATALOG_AUTOSTART=0 关闭。
+    """
+    if not settings.catalog_base_url.strip():
+        return
+    if not getattr(settings, "catalog_autostart", False):
+        return
+    if _catalog_reachable():
+        return
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "services.catalog"],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return  # 拉不起来就走降级：/market/* 给中文不可用提示
+    atexit.register(proc.terminate)
+
+
 def _market_proxy(method: str, path: str, **kwargs) -> dict:
     if not settings.catalog_base_url.strip():
         raise HTTPException(
@@ -608,7 +645,10 @@ def _market_proxy(method: str, path: str, **kwargs) -> dict:
     try:
         response = _catalog_client().request(method, path, **kwargs)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"在线目录暂不可用: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"在线目录暂不可用: {exc}（爬取服务未运行或不可达——本机会在主服务启动时自动托管，外部部署请启动 services/catalog）",
+        ) from exc
     if response.status_code >= 400:
         try:
             detail = response.json().get("detail", "")
@@ -716,4 +756,5 @@ def install_skill(req: InstallRequest) -> dict:
 if __name__ == "__main__":
     import uvicorn
 
+    _ensure_catalog_service()
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)

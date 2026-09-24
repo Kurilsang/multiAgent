@@ -228,9 +228,9 @@ class LobeHubSource:
 
 
 def _default_client():
-    import httpx
+    from ..stdlib_http import UrllibHttpClient
 
-    return httpx.Client(follow_redirects=True)
+    return UrllibHttpClient()
 
 
 def _zip_to_pack(blob: bytes, origin: str) -> SkillPack:

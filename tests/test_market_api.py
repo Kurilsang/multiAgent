@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -182,6 +183,48 @@ class MarketApiTest(unittest.TestCase):
         resp = self.client.post("/skills/install", json={"source": "catalog"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("缺少目录条目", resp.json()["detail"])
+
+
+class CatalogAutostartTest(unittest.TestCase):
+    """本机爬取服务托管：省掉手动第二个终端，独立进程语义不变。"""
+
+    def _settings(self, autostart: bool):
+        settings = StubSettings()
+        settings.catalog_autostart = autostart
+        settings.catalog_base_url = "http://catalog.test"
+        return settings
+
+    def test_autostart_spawns_managed_child_when_unreachable(self):
+        with unittest.mock.patch.object(server, "settings", self._settings(True)), \
+                unittest.mock.patch.object(server, "_catalog_reachable", return_value=False), \
+                unittest.mock.patch.object(server.subprocess, "Popen") as popen:
+            server._ensure_catalog_service()
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0][1:], ["-m", "services.catalog"])
+
+    def test_autostart_skipped_when_reachable_or_disabled_or_empty(self):
+        with unittest.mock.patch.object(server, "settings", self._settings(True)), \
+                unittest.mock.patch.object(server, "_catalog_reachable", return_value=True), \
+                unittest.mock.patch.object(server.subprocess, "Popen") as popen:
+            server._ensure_catalog_service()
+        with unittest.mock.patch.object(server, "settings", self._settings(False)), \
+                unittest.mock.patch.object(server, "_catalog_reachable", return_value=False), \
+                unittest.mock.patch.object(server.subprocess, "Popen") as popen2:
+            server._ensure_catalog_service()
+        settings = self._settings(True)
+        settings.catalog_base_url = ""
+        with unittest.mock.patch.object(server, "settings", settings), \
+                unittest.mock.patch.object(server.subprocess, "Popen") as popen3:
+            server._ensure_catalog_service()
+        popen.assert_not_called()
+        popen2.assert_not_called()
+        popen3.assert_not_called()
+
+    def test_spawn_failure_degrades_gracefully(self):
+        with unittest.mock.patch.object(server, "settings", self._settings(True)), \
+                unittest.mock.patch.object(server, "_catalog_reachable", return_value=False), \
+                unittest.mock.patch.object(server.subprocess, "Popen", side_effect=OSError("no")):
+            server._ensure_catalog_service()  # 不抛异常：走 /market/* 中文降级
 
 
 if __name__ == "__main__":

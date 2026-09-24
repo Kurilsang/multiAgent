@@ -32,7 +32,12 @@
 
 import json
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Iterator
+from json import dumps as json_dumps
+from json import loads as json_loads
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -536,11 +541,63 @@ class InstallRequest(BaseModel):
 # ---- 技能在线目录代理（/market/*）：主服务零外网，一切经爬取服务 ----
 
 
+class _CatalogResponse:
+    """爬取服务响应（合同：status_code / json()，与测试替身同形）。"""
+
+    def __init__(self, status_code: int, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _UrllibCatalogClient:
+    """标准库 HTTP 客户端（GET/POST JSON），服务间窄接口专用。
+
+    刻意不用第三方 HTTP 库：主服务对爬取服务只发两种请求，标准库足够，
+    且免疫「依赖随传递依赖漂移」——曾因 openai 3.x 改携 httpx2、直接
+    import httpx 在运行时炸（测试缝全绿但真实传输层未被执行），故锚定
+    标准库并以回归测试守住。
+    """
+
+    def __init__(self, base_url: str, timeout: float = 15.0):
+        self._base = base_url.rstrip("/")
+        self._timeout = timeout
+
+    def request(self, method, path, params=None, json=None, **_):
+        url = self._base + path
+        if params:
+            kept = {k: v for k, v in params.items() if v not in (None, "")}
+            if kept:
+                url += "?" + urllib.parse.urlencode(kept)
+        json_body = json
+        data = None
+        headers = {}
+        if json_body is not None:
+            data = json_dumps(json_body).encode()
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                return _CatalogResponse(
+                    response.status, _load_json(response.read().decode("utf-8", "replace"))
+                )
+        except urllib.error.HTTPError as exc:  # 4xx/5xx 也是有效响应（载荷带 detail）
+            return _CatalogResponse(exc.code, _load_json(exc.read().decode("utf-8", "replace")))
+        # URLError / 超时向上抛，由 _market_proxy 统一转 502 中文降级
+
+
+def _load_json(text: str):
+    try:
+        return json_loads(text)
+    except ValueError:
+        return {}
+
+
 def _catalog_client():
     """爬取服务客户端（测试注入点：替换为 fake 即可断言零外网）。"""
-    import httpx
-
-    return httpx.Client(base_url=settings.catalog_base_url.strip(), timeout=15.0)
+    return _UrllibCatalogClient(settings.catalog_base_url.strip())
 
 
 def _market_proxy(method: str, path: str, **kwargs) -> dict:

@@ -167,6 +167,16 @@ class MarketApiTest(unittest.TestCase):
         self.assertEqual(results[0]["status"], "invalid")
         self.assertIn("frontmatter", results[0]["detail"])
 
+    def test_real_catalog_client_is_stdlib_only(self):
+        """真实传输层可构造——回归锚：曾因未声明的 httpx 依赖在运行时炸。
+
+        测试缝里 _catalog_client 被 fake 顶替，真实实现从未被执行；
+        此测试真实构造它（标准库 urllib，零第三方 HTTP 依赖）。
+        """
+        client = server._catalog_client()
+        self.assertTrue(hasattr(client, "request"))
+        self.assertEqual(client._base, "http://catalog.test")
+
     def test_install_requires_catalog_id(self):
         server._catalog_client = lambda: FakeCatalogHttp()
         resp = self.client.post("/skills/install", json={"source": "catalog"})

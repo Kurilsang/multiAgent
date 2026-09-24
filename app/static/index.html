@@ -978,7 +978,7 @@ async function loadMarketOnline() {
     document.getElementById('market-list').textContent = '';
     const err = document.createElement('div');
     err.className = 'load-errors';
-    err.textContent = '在线目录暂不可用：' + e.message;
+    err.textContent = e.message || '在线目录暂不可用';
     document.getElementById('market-list').appendChild(err);
     return;
   }

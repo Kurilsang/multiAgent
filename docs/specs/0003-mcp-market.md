@@ -2,7 +2,7 @@
 
 状态：已定稿（grilling 会话逐条确认 + to-spec 测试缝确认）· 日期：2026-09-24
 关联：[ADR-0001](../adr/0001-state-machine-for-react-loop.md)、[ADR-0002](../adr/0002-dual-layer-termination.md)、[SPEC-0001](0001-skill-market.md)、[SPEC-0002](0002-skill-catalog.md)、CONTEXT.md「工具」「技能」「技能市场」「在线目录」「目录包」
-冲突提示：见「备注」——撤销「主服务零外网」表述，CONTEXT.md/AGENTS.md/README 需同步改写。
+冲突提示：见「备注」——撤销「主服务零外网」表述；CONTEXT.md/AGENTS.md/README 的同步改写已完成（f14ad6e）。
 
 ## 问题（Problem Statement）
 
@@ -133,7 +133,7 @@ MCP 生态已有大量现成的工具服务器（GitHub、文件系统、数据�
 
 ## 备注（Further Notes）
 
-- **冲突标记**：CONTEXT.md「在线目录」词条含「主服务自身零外网」，与本 spec 网络边界决策矛盾；AGENTS.md/README 亦有同表述。实现时改写为「外网元数据交互集中在隔离区、可独立部署升级」，并调整相应的机械核验测试（保留「安装路径无意外外网」的断言语义，删去「主服务永不外连」断言）。
+- **冲突标记**：CONTEXT.md「在线目录」词条含「主服务自身零外网」，与本 spec 网络边界决策矛盾；AGENTS.md/README 亦有同表述。实现时改写为「外网元数据交互集中在隔离区、可独立部署升级」，并调整相应的机械核验测试（保留「安装路径无意外外网」的断言语义，删去「主服务永不外连」断言）。（已落：f14ad6e 完成表述改写与测试措辞对齐；现场不存在「主服务永不外连」硬断言，无需删除。）
 - **术语缺口（留给 /domain-modeling 补录 CONTEXT.md）**：MCP 服务、连接定义、视图、旁存续读（句柄池）、MCP 工具（`mcp__` 前缀命名）；「工具」词条或需补 MCP 工具细分。
 - **ADR 一致性**：不改 ReAct 状态机（ADR-0001）——MCP 工具调用与其他工具同为「思考→行动→观察→判断」节点的普通工具；双层终止（ADR-0002）不变，续读计入迭代预算，不新增终止层。
 - **Registry 风险**：处于 preview 阶段，schema/端点可能 breaking change 或数据重置；限流配额未公开，按官方「低频聚合」预期设计（沿用现有刷新间隔）。适配器 + fixture 是隔离这些风险的缓冲层。

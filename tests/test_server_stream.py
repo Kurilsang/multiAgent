@@ -58,6 +58,7 @@ class StubSettings:
     chat_max_tool_turns = 4
     catalog_base_url = "http://catalog.test"
     mcp_max_tools = 64
+    observation_max_chars = 4000
 
     def api_key_for(self, provider: str) -> str:
         return "test-key"

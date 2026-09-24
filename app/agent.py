@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from .llm import LLMError, ReasoningDelta, ResponseToolCalls, TextDelta
+from .observation import ResultPool, format_observation
 from .skills import Skill, SkillRegistry, catalog_section
 from .tools import ToolRegistry
 
@@ -206,6 +207,7 @@ class AgentEngine:
         max_observation_chars: int = DEFAULT_MAX_OBSERVATION_CHARS,
         skills: SkillRegistry | None = None,
         catalog_max: int = 30,
+        observation_pool: ResultPool | None = None,
     ):
         if not tools.names():
             raise ValueError("Agent 引擎至少需要一个工具，否则无法形成行动-观察回路")
@@ -217,6 +219,7 @@ class AgentEngine:
         self._catalog_max = catalog_max
         self._max_iterations = max_iterations
         self._max_observation_chars = max_observation_chars
+        self.observation_pool = observation_pool or ResultPool()
         # finish 是协议工具：随每次请求注入 schema，但不属于注册表
         self._schemas = [*tools.openai_schemas(), _FINISH_SCHEMA]
 
@@ -334,8 +337,8 @@ class AgentEngine:
     def _execute(self, call: _ParsedCall) -> tuple[str, bool]:
         """执行一次工具调用；失败转为错误观察值回灌，模型可自愈。
 
-        观察值默认按上限截断保护上下文；full_result 工具（如 use_skill
-        的技能正文）是刻意加载的上下文，完整回灌。
+        观察值默认按视图大小截断（全文旁存句柄池，read_tool_result 续读）；
+        full_result 工具（如 use_skill 的技能正文）是刻意加载的上下文，完整回灌。
         """
         try:
             tool = self._tools.get(call.name)
@@ -345,14 +348,25 @@ class AgentEngine:
             result = tool.run(call.arguments)
         except Exception as exc:  # 工具内部错误不终止任务，交给模型决断
             return (
-                truncate_text(
-                    f"工具 {call.name} 执行失败：{exc}", self._max_observation_chars
+                format_observation(
+                    f"工具 {call.name} 执行失败：{exc}",
+                    limit=tool.max_observation_chars,
+                    pool=self.observation_pool,
+                    default_limit=self._max_observation_chars,
                 ),
                 True,
             )
-        if not tool.full_result:
-            result = truncate_text(result, self._max_observation_chars)
-        return result, False
+        if tool.full_result:
+            return result, False
+        return (
+            format_observation(
+                result,
+                limit=tool.max_observation_chars,
+                pool=self.observation_pool,
+                default_limit=self._max_observation_chars,
+            ),
+            False,
+        )
 
     def _is_dead_loop(self, recent_actions: list[tuple[str, str]]) -> bool:
         if len(recent_actions) < DEAD_LOOP_THRESHOLD:

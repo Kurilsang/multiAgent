@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from .mcp import McpManager, load_servers, resolve_config_path, sdk_client_factory
+from .observation import ResultPool, read_tool_result_tool
 
 from .agent import (
     OBSERVATION_PREVIEW_CHARS,
@@ -213,6 +214,11 @@ def main() -> int:
     )
     for tool in skill_tools(skill_registry):
         tool_registry.register(tool)
+    # 观察值视图 + 旁存续读：read_tool_result 元工具与引擎共用一个句柄池
+    observation_pool = ResultPool()
+    tool_registry.register(
+        read_tool_result_tool(observation_pool, chunk_size=settings.observation_max_chars)
+    )
     # MCP 连接定义：建连并以 mcp__* 灌入注册表（技能包可声明其为依赖），再热加载技能包
     mcp_servers, mcp_parse_errors = load_servers(
         path=resolve_config_path(settings.mcp_config, PROJECT_ROOT)
@@ -233,8 +239,10 @@ def main() -> int:
         llm,
         tool_registry,
         max_iterations=settings.agent_max_iterations,
+        max_observation_chars=settings.observation_max_chars,
         skills=skill_registry,
         catalog_max=settings.skills_catalog_max,
+        observation_pool=observation_pool,
     )
 
     console.print("[bold]multiagent 终端对话[/bold]")

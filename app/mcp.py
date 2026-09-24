@@ -363,6 +363,7 @@ class McpManager:
                     parameters=entry.meta.get("parameters")
                     or {"type": "object", "properties": {}, "required": []},
                     func=_make_tool_func(self, full),
+                    max_observation_chars=entry.server.max_observation_chars,
                 )
             )
         return result

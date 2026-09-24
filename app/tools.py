@@ -29,6 +29,7 @@ class Tool:
     parameters: dict  # JSON Schema 对象
     func: Callable[..., str]
     full_result: bool = False
+    max_observation_chars: int | None = None  # 工具级观察值视图大小覆盖；None=全局默认，0=全量直灌
 
     def openai_schema(self) -> dict:
         """OpenAI function calling 的 tools 数组条目。"""

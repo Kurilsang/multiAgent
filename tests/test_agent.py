@@ -185,7 +185,8 @@ class TerminationGuardTest(unittest.TestCase):
 
 
 class ObservationLimitTest(unittest.TestCase):
-    def test_oversized_observation_is_truncated(self):
+    def test_oversized_observation_becomes_view_with_read_more(self):
+        """超限观察值 = 视图 + 旁存续读指引（全文不丢弃，read_tool_result 取回）。"""
         engine = make_engine(
             [
                 tool_round("echo", {}),
@@ -196,8 +197,9 @@ class ObservationLimitTest(unittest.TestCase):
         )
         events = list(engine.run("测试任务"))
         observed = events[2]
-        self.assertLessEqual(len(observed.result), 101)
-        self.assertTrue(observed.result.endswith("…"))
+        self.assertTrue(observed.result.startswith("x" * 100))  # 视图进上下文
+        self.assertIn("全文共 500 字符", observed.result)  # 旁存续读指引
+        self.assertIn("read_tool_result", observed.result)
 
 
 class SkillInjectionTest(unittest.TestCase):

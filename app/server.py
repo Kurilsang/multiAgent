@@ -49,7 +49,6 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .agent import (
-    DEFAULT_MAX_OBSERVATION_CHARS,
     ActionObserved,
     ActionStarted,
     AgentEngine,
@@ -57,7 +56,6 @@ from .agent import (
     TaskFinished,
     TaskStarted,
     ThoughtDelta,
-    truncate_text,
 )
 from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
 from .conversation import Conversation
@@ -68,6 +66,12 @@ from .mcp import (
     load_servers,
     resolve_config_path,
     sdk_client_factory,
+)
+from .observation import (
+    READ_TOOL_NAME,
+    ResultPool,
+    format_observation,
+    read_tool_result_tool,
 )
 from .skills import (
     PRESET_SOURCES,
@@ -104,6 +108,10 @@ def _build_wiring(
     skills = SkillRegistry(skills_dir, tools=tools)
     for tool in skill_tools(skills):
         tools.register(tool)
+    pool = ResultPool()
+    tools.register(
+        read_tool_result_tool(pool, chunk_size=settings.observation_max_chars)
+    )
     servers, mcp_parse_errors = load_servers(path=mcp_config)
     mcp = McpManager(
         servers,
@@ -119,8 +127,10 @@ def _build_wiring(
         llm,
         tools,
         max_iterations=settings.agent_max_iterations,
+        max_observation_chars=settings.observation_max_chars,
         skills=skills,
         catalog_max=settings.skills_catalog_max,
+        observation_pool=pool,
     )
     return tools, skills, errors, engine, mcp
 
@@ -287,7 +297,12 @@ def _chat_tool_call(
         result = tool.run(arguments)
     except Exception as exc:  # 工具内部错误不终止本轮，交给模型决断
         return observed(
-            truncate_text(f"工具 {call_name} 执行失败：{exc}", DEFAULT_MAX_OBSERVATION_CHARS),
+            format_observation(
+                f"工具 {call_name} 执行失败：{exc}",
+                limit=tool.max_observation_chars,
+                pool=agent_engine.observation_pool,
+                default_limit=settings.observation_max_chars,
+            ),
             True,
         )
     activated: tuple[str, ...] = ()
@@ -296,7 +311,12 @@ def _chat_tool_call(
         if entry is not None:
             activated = entry.skill.tools
     if not tool.full_result:
-        result = truncate_text(result, DEFAULT_MAX_OBSERVATION_CHARS)
+        result = format_observation(
+            result,
+            limit=tool.max_observation_chars,
+            pool=agent_engine.observation_pool,
+            default_limit=settings.observation_max_chars,
+        )
     frame, message, _ = observed(result, False)
     return frame, message, activated
 
@@ -322,8 +342,11 @@ def _chat_frames(req: ChatRequest, target) -> Iterator[str]:
                 }
             )
         messages.extend(conversation.messages_for_api())
-        schemas = [tool_registry.get(name).openai_schema() for name in SKILL_TOOL_NAMES]
-        offered = set(SKILL_TOOL_NAMES)
+        schemas = [
+            tool_registry.get(name).openai_schema()
+            for name in (*SKILL_TOOL_NAMES, READ_TOOL_NAME)
+        ]
+        offered = set(SKILL_TOOL_NAMES) | {READ_TOOL_NAME}
         try:
             for _ in range(settings.chat_max_tool_turns):
                 text_parts: list[str] = []

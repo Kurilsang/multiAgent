@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     skills_dir: str = "skills"
     skills_catalog_max: int = Field(default=30, ge=1)
 
+    # 工具观察值视图大小：截断时全文旁存、read_tool_result 续读（0 = 全量直灌）
+    observation_max_chars: int = Field(default=4000, ge=0)
+
     # MCP 连接定义文件（相对项目根）；MCP 工具总数上限（超限装配期 fail loud，0 = 不限）
     mcp_config: str = "mcp/servers.json"
     mcp_max_tools: int = Field(default=64, ge=0)

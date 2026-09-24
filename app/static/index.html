@@ -1057,7 +1057,7 @@ async function previewSkillMd() {
     const res = await fetch('/market/detail?' + params);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
-    pre.textContent = data.skill_md || '（无内容）';
+    pre.textContent = data.manifest_text || '（无内容）';
     for (const a of (data.audits || [])) document.getElementById('cf-badges').appendChild(auditBadge(a));
   } catch (e) {
     pre.textContent = '预览不可用：' + e.message;

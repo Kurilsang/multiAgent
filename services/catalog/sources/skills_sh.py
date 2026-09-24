@@ -24,9 +24,9 @@ from ..schema import (
     AuditBadge,
     CatalogEntry,
     CatalogError,
-    SkillDetail,
-    SkillPack,
-    peek_skill_meta,
+    CatalogDetail,
+    CatalogPack,
+    peek_manifest_meta,
 )
 
 BASE_URL = "https://skills.sh"
@@ -128,11 +128,11 @@ class SkillsShSource:
             )
         return list(seen.values())
 
-    def detail(self, ref: str) -> SkillDetail:
-        """确认卡预览：SKILL.md 全文（git 拉取）+ 详情页审计徽标。"""
+    def detail(self, ref: str) -> CatalogDetail:
+        """确认卡预览：manifest（SKILL.md）全文（git 拉取）+ 详情页审计徽标。"""
         pack = self.fetch_pack(ref)
         skill_md = next(text for path, text in pack.files if path.endswith("SKILL.md"))
-        meta = peek_skill_meta(skill_md)
+        meta = peek_manifest_meta(skill_md)
         entry = CatalogEntry.from_raw(
             {
                 "id": ref,
@@ -144,9 +144,14 @@ class SkillsShSource:
             },
             source="skills-sh",
         )
-        return SkillDetail(entry=entry, skill_md=skill_md, audits=parse_audits(self._fetch_page(f"/{ref}")))
+        return CatalogDetail(
+            entry=entry,
+            manifest_text=skill_md,
+            manifest_path="SKILL.md",
+            audits=parse_audits(self._fetch_page(f"/{ref}")),
+        )
 
-    def fetch_pack(self, ref: str) -> SkillPack:
+    def fetch_pack(self, ref: str) -> CatalogPack:
         """目录包获取：克隆 GitHub 仓库定位技能目录，归一 SKILL.md 文件集。
 
         well-known 来源（如 agent.qq.com/mail）无 git 坐标，暂不支持直装。
@@ -171,11 +176,12 @@ class SkillsShSource:
                 for item in sorted(pack_dir.rglob("*"))
                 if item.is_file() and item.name != "SKILL.md"
             )
-        return SkillPack(
+        return CatalogPack(
             files=(("SKILL.md", skill_md),),
             extra_files=extras,
             origin=repo_url,
             source="skills-sh",
+            manifest_path="SKILL.md",
         )
 
     def _fetch_page(self, path: str) -> str:
@@ -219,7 +225,7 @@ def _locate_pack_dir(repo_root: Path, slug: str) -> Path:
     for pack_file in sorted(repo_root.rglob("SKILL.md")):
         if pack_file.parent.name == slug:
             return pack_file.parent
-        meta = peek_skill_meta(pack_file.read_text(encoding="utf-8", errors="replace"))
+        meta = peek_manifest_meta(pack_file.read_text(encoding="utf-8", errors="replace"))
         if meta["name"] == slug:
             return pack_file.parent
     raise CatalogError(f"仓库中未找到技能 {slug!r} 的 SKILL.md", 404)

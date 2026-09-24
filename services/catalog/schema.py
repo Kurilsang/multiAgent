@@ -43,9 +43,12 @@ _FM_NAME_RE = re.compile(r"^name:\s*(.+)$", re.M)
 _FM_DESC_RE = re.compile(r"^description:\s*(.+)$", re.M)
 
 
-def peek_skill_meta(skill_md: str) -> dict:
-    """从 SKILL.md frontmatter 宽松取 name/description（详情预览用）。"""
-    text = skill_md or ""
+def peek_manifest_meta(manifest: str) -> dict:
+    """从 manifest frontmatter 宽松取 name/description（详情预览用）。
+
+    当前清单形态为 SKILL.md（frontmatter + 正文）；其他形态清单由适配器自理解。
+    """
+    text = manifest or ""
     head = ""
     if text.lstrip().startswith("---"):
         parts = text.split("---", 2)
@@ -107,6 +110,7 @@ class CatalogEntry:
     description: str
     source: str  # 平台标识：skills-sh | lobehub
     origin: str  # owner/repo 或市场标识
+    kind: str = "skill"  # 资产类型：skill | mcp
     installs: int = 0
     stars: int = 0
     tags: tuple[str, ...] = field(default_factory=tuple)
@@ -123,6 +127,7 @@ class CatalogEntry:
             "description": self.description,
             "source": self.source,
             "origin": self.origin,
+            "kind": self.kind,
             "installs": self.installs,
             "stars": self.stars,
             "tags": list(self.tags),
@@ -146,6 +151,7 @@ class CatalogEntry:
             description=clean_text(raw.get("description"), MAX_DESCRIPTION_CHARS),
             source=source,
             origin=clean_text(raw.get("origin"), 200),
+            kind=clean_text(raw.get("kind"), 16) or "skill",
             installs=_to_int(raw.get("installs")),
             stars=_to_int(raw.get("stars")),
             tags=_clean_tags(raw.get("tags")),
@@ -162,29 +168,36 @@ class CatalogEntry:
 
 
 @dataclass(frozen=True)
-class SkillDetail:
-    """确认卡预览载荷：条目信息 + SKILL.md 全文 + 审计明细。"""
+class CatalogDetail:
+    """确认卡预览载荷：条目信息 + manifest 全文 + 审计明细（通用 manifest 字段）。"""
 
     entry: CatalogEntry
-    skill_md: str
+    manifest_text: str
+    manifest_path: str = ""
     audits: tuple[AuditBadge, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
         return {
             "entry": self.entry.to_dict(),
-            "skill_md": self.skill_md,
+            "manifest_path": self.manifest_path,
+            "manifest_text": self.manifest_text,
             "audits": [badge.to_dict() for badge in self.audits],
         }
 
 
 @dataclass(frozen=True)
-class SkillPack:
-    """目录包：安装所需的 SKILL.md 文件集（平台分发差异在适配器内归一）。"""
+class CatalogPack:
+    """目录包：安装所需的 manifest 文件集（平台分发差异在适配器内归一）。
 
-    files: tuple[tuple[str, str], ...]  # (相对路径, 内容)；至少含一个 SKILL.md
+    manifest_path 指定清单文件（当前形态 SKILL.md）；kind 为资产类型（skill | mcp）。
+    """
+
+    files: tuple[tuple[str, str], ...]  # (相对路径, 内容)；至少含 manifest_path 指定文件
     extra_files: tuple[str, ...] = ()  # 附带脚本/资源（主服务丢弃并警告）
     origin: str = ""
     source: str = ""
+    manifest_path: str = ""
+    kind: str = "skill"
 
     def to_dict(self) -> dict:
         return {
@@ -192,6 +205,8 @@ class SkillPack:
             "extra_files": list(self.extra_files),
             "origin": self.origin,
             "source": self.source,
+            "manifest_path": self.manifest_path,
+            "kind": self.kind,
         }
 
 

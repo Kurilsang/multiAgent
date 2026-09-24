@@ -32,9 +32,9 @@ from ..schema import (
     AuditBadge,
     CatalogEntry,
     CatalogError,
-    SkillDetail,
-    SkillPack,
-    peek_skill_meta,
+    CatalogDetail,
+    CatalogPack,
+    peek_manifest_meta,
 )
 
 BASE_URL = "https://market.lobehub.com"
@@ -175,11 +175,11 @@ class LobeHubSource:
                 break
         return entries
 
-    def detail(self, ref: str) -> SkillDetail:
-        """确认卡预览：从 ZIP 包取 SKILL.md 全文（审计以列表条目的 isValidated 为准）。"""
+    def detail(self, ref: str) -> CatalogDetail:
+        """确认卡预览：从 ZIP 包取 manifest（SKILL.md）全文（审计以列表条目的 isValidated 为准）。"""
         pack = self.fetch_pack(ref)
         skill_md = next(text for path, text in pack.files if path.endswith("SKILL.md"))
-        meta = peek_skill_meta(skill_md)
+        meta = peek_manifest_meta(skill_md)
         entry = CatalogEntry.from_raw(
             {
                 "id": ref,
@@ -191,9 +191,11 @@ class LobeHubSource:
             },
             source="lobehub",
         )
-        return SkillDetail(entry=entry, skill_md=skill_md)
+        return CatalogDetail(
+            entry=entry, manifest_text=skill_md, manifest_path="SKILL.md"
+        )
 
-    def fetch_pack(self, ref: str) -> SkillPack:
+    def fetch_pack(self, ref: str) -> CatalogPack:
         """目录包获取：下载 ZIP 并解包为 SKILL.md 文件集（防 zip-slip）。"""
         response = self._request(
             "GET",
@@ -233,7 +235,7 @@ def _default_client():
     return UrllibHttpClient()
 
 
-def _zip_to_pack(blob: bytes, origin: str) -> SkillPack:
+def _zip_to_pack(blob: bytes, origin: str) -> CatalogPack:
     """ZIP → 目录包：zip-slip 防护（绝对路径与 .. 一律拒绝）+ 顶层目录归一。"""
     try:
         archive = zipfile.ZipFile(io.BytesIO(blob))
@@ -258,8 +260,12 @@ def _zip_to_pack(blob: bytes, origin: str) -> SkillPack:
             extras.append(str(path))
     if not files:
         raise CatalogError("LobeHub 包内未找到 SKILL.md", 502)
-    return SkillPack(
-        files=tuple(files), extra_files=tuple(extras), origin=origin, source="lobehub"
+    return CatalogPack(
+        files=tuple(files),
+        extra_files=tuple(extras),
+        origin=origin,
+        source="lobehub",
+        manifest_path="SKILL.md",
     )
 
 

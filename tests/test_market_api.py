@@ -96,7 +96,7 @@ class MarketApiTest(unittest.TestCase):
             {
                 "/internal/sources": FakeCatalogResponse({"sources": []}),
                 "/internal/search": FakeCatalogResponse({"items": [1], "total": 1}),
-                "/internal/detail": FakeCatalogResponse({"skill_md": "x"}),
+                "/internal/detail": FakeCatalogResponse({"manifest_text": "x"}),
                 "/internal/refresh": FakeCatalogResponse({"results": []}),
             }
         )
@@ -105,7 +105,7 @@ class MarketApiTest(unittest.TestCase):
         self.assertEqual(self.client.get("/market/search", params={"q": "pdf"}).json()["total"], 1)
         self.assertEqual(
             self.client.get("/market/detail", params={"id": "a", "source": "s"}).json(),
-            {"skill_md": "x"},
+            {"manifest_text": "x"},
         )
         self.assertEqual(self.client.post("/market/refresh", json={}).json(), {"results": []})
 

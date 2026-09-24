@@ -82,9 +82,10 @@ class SkillsShPackTest(unittest.TestCase):
             source.fetch_pack("owner/repo/alpha")
         self.assertIn("克隆失败", str(ctx.exception))
 
-    def test_detail_returns_skill_md_and_audits(self):
+    def test_detail_returns_manifest_text_and_audits(self):
         detail = self.make_source().detail("owner/repo/alpha")
-        self.assertIn("正文内容", detail.skill_md)
+        self.assertIn("正文内容", detail.manifest_text)
+        self.assertEqual(detail.manifest_path, "SKILL.md")
         self.assertEqual(detail.entry.name, "alpha")
         self.assertEqual([b.provider for b in detail.audits], ["Socket", "Snyk"])
         self.assertEqual(detail.audits[1].status, "warn")
@@ -138,7 +139,7 @@ class LobeHubPackTest(unittest.TestCase):
         detail = self.make_source(blob).detail("owner-repo")
         self.assertEqual(detail.entry.name, "alpha")
         self.assertEqual(detail.entry.description, "测试技能")
-        self.assertIn("正文内容", detail.skill_md)
+        self.assertIn("正文内容", detail.manifest_text)
 
 
 if __name__ == "__main__":

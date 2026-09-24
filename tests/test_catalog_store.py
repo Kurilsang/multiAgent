@@ -53,6 +53,41 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(loaded.audits[0].risk_level, "LOW")
         self.assertTrue(loaded.validated)
 
+    def test_kind_roundtrips_in_cache(self):
+        from services.catalog.schema import CatalogEntry
+
+        entry = CatalogEntry(
+            id="io.x/y", name="n", description="d", source="a", origin="o", kind="mcp"
+        )
+        self.store.replace_source("a", [entry], "t1")
+        self.assertEqual(self.store.search()[0][0].kind, "mcp")
+
+    def test_legacy_db_without_kind_column_migrates(self):
+        import sqlite3
+
+        self.store.close()
+        self.path.unlink()
+        conn = sqlite3.connect(str(self.path))
+        conn.execute(
+            "CREATE TABLE entries (source TEXT NOT NULL, id TEXT NOT NULL,"
+            " name TEXT NOT NULL, description TEXT NOT NULL, origin TEXT NOT NULL,"
+            " installs INTEGER NOT NULL DEFAULT 0, stars INTEGER NOT NULL DEFAULT 0,"
+            " tags TEXT NOT NULL DEFAULT '[]', detail_url TEXT NOT NULL DEFAULT '',"
+            " install_ref TEXT NOT NULL DEFAULT '', audits TEXT NOT NULL DEFAULT '[]',"
+            " validated INTEGER NOT NULL DEFAULT 0,"
+            " is_duplicate INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO entries (source, id, name, description, origin)"
+            " VALUES ('a', 'a/b', 'n', 'd', 'o')"
+        )
+        conn.commit()
+        conn.close()
+        self.store = SqliteStore(self.path)  # 旧库（无 kind 列）自动迁移
+        items, total = self.store.search()
+        self.assertEqual(total, 1)
+        self.assertEqual(items[0].kind, "skill")
+
     def test_record_error_keeps_cache_and_marks_stale(self):
         self.store.replace_source("fake", make_catalog_entries(5), "t1")
         self.store.record_error("fake", "平台不可达")

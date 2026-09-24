@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS entries (
   name TEXT NOT NULL,
   description TEXT NOT NULL,
   origin TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'skill',
   installs INTEGER NOT NULL DEFAULT 0,
   stars INTEGER NOT NULL DEFAULT 0,
   tags TEXT NOT NULL DEFAULT '[]',
@@ -130,6 +131,12 @@ class SqliteStore:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
+        try:  # 旧库（无 kind 列）迁移：kind 默认 skill
+            self._conn.execute(
+                "ALTER TABLE entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill'"
+            )
+        except sqlite3.OperationalError:
+            pass
         self._conn.commit()
 
     def close(self) -> None:
@@ -141,9 +148,9 @@ class SqliteStore:
         with self._lock:
             self._conn.execute("DELETE FROM entries WHERE source = ?", (source,))
             self._conn.executemany(
-                "INSERT INTO entries (source, id, name, description, origin, installs,"
-                " stars, tags, detail_url, install_ref, audits, validated, is_duplicate)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO entries (source, id, name, description, origin, kind,"
+                " installs, stars, tags, detail_url, install_ref, audits, validated,"
+                " is_duplicate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [self._row(source, entry) for entry in entries],
             )
             self._conn.execute(
@@ -180,8 +187,8 @@ class SqliteStore:
                 f"SELECT COUNT(*) FROM entries{clause}", params
             ).fetchone()[0]
             rows = self._conn.execute(
-                f"SELECT source, id, name, description, origin, installs, stars, tags,"
-                f" detail_url, install_ref, audits, validated, is_duplicate"
+                f"SELECT source, id, name, description, origin, kind, installs, stars,"
+                f" tags, detail_url, install_ref, audits, validated, is_duplicate"
                 f" FROM entries{clause} ORDER BY rowid LIMIT ? OFFSET ?",
                 [*params, page_size, (page - 1) * page_size],
             ).fetchall()
@@ -224,6 +231,7 @@ class SqliteStore:
             entry.name,
             entry.description,
             entry.origin,
+            entry.kind,
             entry.installs,
             entry.stars,
             json.dumps(list(entry.tags), ensure_ascii=False),
@@ -242,6 +250,7 @@ class SqliteStore:
             name,
             description,
             origin,
+            kind,
             installs,
             stars,
             tags,
@@ -257,6 +266,7 @@ class SqliteStore:
             description=description,
             source=source,
             origin=origin,
+            kind=kind,
             installs=installs,
             stars=stars,
             tags=tuple(json.loads(tags)),

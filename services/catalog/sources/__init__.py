@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..schema import CatalogEntry, SkillDetail, SkillPack
+from ..schema import CatalogDetail, CatalogEntry, CatalogPack
 
 __all__ = ["CatalogSource", "build_sources"]
 
 
 class CatalogSource(Protocol):
-    """一个技能平台源。ref/install_ref 的含义由各源自定（如 id 或 identifier）。"""
+    """一个目录平台源。ref/install_ref 的含义由各源自定（如 id 或 identifier）。"""
 
     name: str
 
@@ -22,12 +22,12 @@ class CatalogSource(Protocol):
         """枚举目录条目（刷新用）；网络失败抛 CatalogError。"""
         ...
 
-    def detail(self, ref: str) -> SkillDetail:
-        """确认卡预览：条目 + SKILL.md 全文 + 审计明细。"""
+    def detail(self, ref: str) -> CatalogDetail:
+        """确认卡预览：条目 + manifest 全文 + 审计明细。"""
         ...
 
-    def fetch_pack(self, ref: str) -> SkillPack:
-        """目录包获取：SKILL.md 文件集（附带文件列 extra_files）。"""
+    def fetch_pack(self, ref: str) -> CatalogPack:
+        """目录包获取：manifest 文件集（附带文件列 extra_files）。"""
         ...
 
 

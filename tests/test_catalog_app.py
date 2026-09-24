@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from services.catalog.app import create_app
 from services.catalog.config import CatalogSettings
-from services.catalog.schema import CatalogError, SkillDetail, SkillPack
+from services.catalog.schema import CatalogDetail, CatalogError, CatalogPack
 from services.catalog.store import MemoryStore
 
 from tests.fakes import (
@@ -72,19 +72,29 @@ class CatalogAppTest(unittest.TestCase):
 
     def test_detail_and_pack_passthrough(self):
         entry = make_catalog_entries(1)[0]
-        self.source.detail_result = SkillDetail(entry=entry, skill_md=load_catalog_fixture("fake-skill.md"))
-        self.source.pack_result = SkillPack(
+        self.source.detail_result = CatalogDetail(
+            entry=entry,
+            manifest_path="SKILL.md",
+            manifest_text=load_catalog_fixture("fake-skill.md"),
+        )
+        self.source.pack_result = CatalogPack(
             files=(("SKILL.md", "---\nname: x\n---\n正文"),),
             extra_files=("run.js",),
             origin="owner/repo",
             source="fake",
+            manifest_path="SKILL.md",
         )
         resp = self.client.get("/internal/detail", params={"id": "fake/skill-1", "source": "fake"})
-        self.assertIn("name: fake", resp.json()["skill_md"])
+        data = resp.json()
+        self.assertIn("name: fake", data["manifest_text"])
+        self.assertEqual(data["manifest_path"], "SKILL.md")
+        self.assertNotIn("skill_md", data)
         resp = self.client.get("/internal/pack/fake/skill-1", params={"source": "fake"})
         data = resp.json()
         self.assertEqual(data["files"][0]["path"], "SKILL.md")
         self.assertEqual(data["extra_files"], ["run.js"])
+        self.assertEqual(data["manifest_path"], "SKILL.md")
+        self.assertEqual(data["kind"], "skill")
 
     def test_unknown_source_returns_404(self):
         resp = self.client.get("/internal/detail", params={"id": "x", "source": "nope"})

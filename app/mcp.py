@@ -48,6 +48,7 @@ class McpServer:
     command: tuple[str, ...] = ()  # stdio：argv 列表，不经 shell
     url: str = ""  # streamable-http：endpoint（支持 ${VAR} 模板变量）
     env: Mapping[str, str] = field(default_factory=dict)  # ${VAR} 占位原文
+    headers: Mapping[str, str] = field(default_factory=dict)  # 远程请求头（密钥占位）
     enabled: bool = True
     source: str = "local"  # local | catalog:<平台> | import:<path>
     max_observation_chars: int | None = None  # 观察值视图大小覆盖；None=全局默认
@@ -117,6 +118,11 @@ def _parse_entry(raw) -> McpServer:
         raise McpError("env 须为 {变量名: 值} 对象（值可用 ${VAR} 占位）")
     env = {str(key): str(value) for key, value in env_raw.items()}
 
+    headers_raw = raw.get("headers") or {}
+    if not isinstance(headers_raw, dict):
+        raise McpError("headers 须为 {请求头名: 值} 对象（值可用 ${VAR} 占位）")
+    headers = {str(key): str(value) for key, value in headers_raw.items()}
+
     max_observation_chars = raw.get("max_observation_chars")
     if max_observation_chars is not None:
         try:
@@ -138,6 +144,7 @@ def _parse_entry(raw) -> McpServer:
         command=command,
         url=url,
         env=env,
+        headers=headers,
         enabled=bool(raw.get("enabled", True)),
         source=_clean_str(raw.get("source"), 64) or "local",
         max_observation_chars=max_observation_chars,
@@ -146,11 +153,15 @@ def _parse_entry(raw) -> McpServer:
 
 
 def resolve_placeholders(
-    *, env: Mapping[str, str], url: str, environ: Mapping[str, str]
+    *,
+    env: Mapping[str, str],
+    url: str = "",
+    headers: Mapping[str, str] | None = None,
+    environ: Mapping[str, str],
 ) -> tuple[dict, list[str]]:
-    """解析 ${VAR} 占位（值来自 .env / 环境变量）。
+    """解析 ${VAR} 占位（值来自 .env / 环境变量），覆盖 env 值、url 模板与请求头。
 
-    返回 ({"env": 解析后, "url": 解析后}, 未解析变量名列表)；
+    返回 ({"env": 解析后, "url": 解析后, "headers": 解析后}, 未解析变量名列表)；
     未解析的占位保留原文，由调用方按「报错并禁用该服务」处置。
     """
     missing: list[str] = []
@@ -166,7 +177,14 @@ def resolve_placeholders(
 
         return _PLACEHOLDER_RE.sub(substitute, text)
 
-    return {"env": {k: resolve(v) for k, v in env.items()}, "url": resolve(url)}, missing
+    return (
+        {
+            "env": {k: resolve(v) for k, v in env.items()},
+            "url": resolve(url),
+            "headers": {k: resolve(v) for k, v in (headers or {}).items()},
+        },
+        missing,
+    )
 
 
 def build_environ(dotenv_path: Path | None = None, environ: Mapping[str, str] | None = None) -> dict:
@@ -263,6 +281,7 @@ class McpManager:
         self._sessions: dict[str, McpSession] = {}
         self._entries: dict[str, _ToolEntry] = {}
         self._statuses: dict[str, tuple[str, str]] = {}
+        self._resolved_servers: dict[str, McpServer] = {}
         self.load_errors: list[str] = []
 
     def connect(self, reserved=()) -> list[str]:
@@ -297,14 +316,21 @@ class McpManager:
         if problem:
             raise McpError(problem)
         resolved, missing = resolve_placeholders(
-            env=server.env, url=server.url, environ=self._environ
+            env=server.env, url=server.url, headers=server.headers, environ=self._environ
         )
         if missing:
             raise McpError(
                 f"未解析的占位符：{'、'.join('${' + var + '}' for var in missing)}"
                 f"——请在 .env 或环境变量中配置"
             )
-        session = self._factory(replace(server, env=resolved["env"], url=resolved["url"]))
+        session = self._factory(
+            replace(
+                server,
+                env=resolved["env"],
+                url=resolved["url"],
+                headers=resolved["headers"],
+            )
+        )
         try:
             metas = session.list_tools()
         except Exception as exc:
@@ -341,6 +367,12 @@ class McpManager:
                 f"——请用 enabled_tools 收窄或提高 MCP_MAX_TOOLS"
             )
         self._sessions[server.name] = session
+        self._resolved_servers[server.name] = replace(
+            server,
+            env=resolved["env"],
+            url=resolved["url"],
+            headers=resolved["headers"],
+        )
         for entry in entries:
             self._entries[entry.full_name] = entry
         self._statuses[server.name] = ("connected", "")
@@ -373,9 +405,47 @@ class McpManager:
         if entry is None:
             raise McpError(f"未注册的 MCP 工具: {full_name!r}")
         try:
-            return str(entry.session.call_tool(entry.meta.get("name", ""), arguments))
+            return self._invoke(entry, arguments)
+        except McpError:  # 工具语义错误：不重试，交给模型决断
+            raise
+        except Exception as exc:  # 传输断裂：自动重连一次并重试该次调用
+            self._reconnect(entry.server.name, cause=exc)
+            entry = self._entries.get(full_name)
+            if entry is None:
+                raise McpError(f"重连后工具已不存在: {full_name!r}") from exc
+            try:
+                return self._invoke(entry, arguments)
+            except McpError:
+                raise
+            except Exception as retry_exc:
+                raise McpError(
+                    f"MCP 工具 {full_name} 调用失败（重连后仍失败）：{retry_exc}"
+                ) from retry_exc
+
+    @staticmethod
+    def _invoke(entry: "_ToolEntry", arguments: dict) -> str:
+        return str(entry.session.call_tool(entry.meta.get("name", ""), arguments))
+
+    def _reconnect(self, name: str, cause: Exception) -> None:
+        """调用中断连后重建会话（恰好一次重试的支撑）；失败译成中文 McpError。"""
+        old = self._sessions.pop(name, None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        resolved = self._resolved_servers.get(name)
+        if resolved is None:
+            raise McpError(f"MCP 服务 {name!r} 重连失败：连接定义已不存在（原错误：{cause}）")
+        try:
+            session = self._factory(resolved)
         except Exception as exc:
-            raise McpError(f"MCP 工具 {full_name} 调用失败：{exc}") from exc
+            self._statuses[name] = ("error", f"重连失败：{exc}")
+            raise McpError(f"MCP 服务 {name!r} 重连失败：{exc}（原错误：{cause}）") from exc
+        self._sessions[name] = session
+        for entry in self._entries.values():
+            if entry.server.name == name:
+                entry.session = session
 
     def listing(self) -> list[dict]:
         """GET /mcp 列表载荷：服务 + 状态 + 工具全名（env 只列变量名，值脱敏）。"""
@@ -391,6 +461,7 @@ class McpManager:
                     "source": server.source,
                     "enabled": server.enabled,
                     "env_keys": sorted(server.env),
+                    "header_keys": sorted(server.headers),
                     "tools": sorted(
                         full for full, entry in self._entries.items()
                         if entry.server.name == server.name
@@ -462,21 +533,16 @@ def _loop_thread() -> _LoopThread:
     return _LOOP_THREAD
 
 
-class _SdkStdioSession:
-    """官方 SDK 的 stdio 会话（McpSession 同步适配）。
+class _SdkSessionBase:
+    """官方 mcp SDK 会话的同步适配基类（stdio / streamable-http 共用生命周期）。
 
     会话生命周期全程驻留在同一协程任务里——anyio 的退出栈要求
     enter/exit 同任务，close 只是把关闭事件置位后等任务收尾。
+    传输差异由子类 _enter_transport 消化。
     """
 
     def __init__(self, server: McpServer):
-        from mcp.client.stdio import StdioServerParameters
-
-        self._params = StdioServerParameters(
-            command=server.command[0],
-            args=list(server.command[1:]),
-            env={**_default_environment(), **dict(server.env)},
-        )
+        self._server = server
         self._closing = asyncio.Event()
         self._ready: concurrent.futures.Future = concurrent.futures.Future()
         self._done: concurrent.futures.Future = concurrent.futures.Future()
@@ -494,12 +560,9 @@ class _SdkStdioSession:
             from contextlib import AsyncExitStack
 
             from mcp import ClientSession
-            from mcp.client.stdio import stdio_client
 
             async with AsyncExitStack() as stack:
-                read, write = await stack.enter_async_context(
-                    stdio_client(self._params)
-                )
+                read, write = await self._enter_transport(stack)
                 session = await stack.enter_async_context(
                     ClientSession(read, write)
                 )
@@ -560,6 +623,42 @@ class _SdkStdioSession:
         return self._session
 
 
+    async def _enter_transport(self, stack):
+        """进入传输上下文，返回 (read, write) 流（子类实现）。"""
+        raise NotImplementedError
+
+
+class _SdkStdioSession(_SdkSessionBase):
+    """stdio 会话：argv 直起子进程（不经 shell），env 合并默认环境。"""
+
+    async def _enter_transport(self, stack):
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+
+        params = StdioServerParameters(
+            command=self._server.command[0],
+            args=list(self._server.command[1:]),
+            env={**_default_environment(), **dict(self._server.env)},
+        )
+        streams = await stack.enter_async_context(stdio_client(params))
+        return streams[0], streams[1]
+
+
+class _SdkStreamableHttpSession(_SdkSessionBase):
+    """streamable-http 会话：远程 endpoint 直连，密钥经请求头传递（展示脱敏）。"""
+
+    async def _enter_transport(self, stack):
+        import httpx2
+        from mcp.client.streamable_http import streamable_http_client
+
+        client = await stack.enter_async_context(
+            httpx2.AsyncClient(headers=dict(self._server.headers) or None)
+        )
+        streams = await stack.enter_async_context(
+            streamable_http_client(self._server.url, http_client=client)
+        )
+        return streams[0], streams[1]
+
+
 def _default_environment() -> dict:
     try:
         from mcp.client.stdio import get_default_environment
@@ -570,11 +669,11 @@ def _default_environment() -> dict:
 
 
 def sdk_client_factory(server: McpServer) -> McpSession:
-    """默认 client factory：官方 mcp SDK 会话（stdio；远程接入后续支持）。"""
-    if server.transport != "stdio":
-        raise McpError("远程（streamable-http）接入尚未实现，当前仅支持 stdio")
+    """默认 client factory：官方 mcp SDK 会话（stdio / streamable-http）。"""
     try:
-        return _SdkStdioSession(server)
+        if server.transport == "stdio":
+            return _SdkStdioSession(server)
+        return _SdkStreamableHttpSession(server)
     except McpError:
         raise
     except Exception as exc:  # pragma: no cover - 防御：保证错误都译成 McpError

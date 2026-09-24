@@ -8,6 +8,7 @@ import sys
 import unittest
 
 from app.mcp import (
+    McpError,
     McpManager,
     McpServer,
     load_servers,
@@ -56,6 +57,23 @@ class ParseServersTest(unittest.TestCase):
         self.assertEqual(entry.max_observation_chars, 8000)
         self.assertEqual(entry.enabled_tools, ("read_file",))
 
+    def test_parses_remote_entry_with_header_secrets(self):
+        servers, errors = load_servers(
+            text="""
+            {"servers": [{
+              "name": "acme/remote",
+              "transport": "streamable-http",
+              "url": "https://mcp.acme.dev/${REGION}/mcp",
+              "headers": {"Authorization": "Bearer ${MCP_ACME_TOKEN}"}
+            }]}
+            """
+        )
+        self.assertEqual(errors, [])
+        entry = servers[0]
+        self.assertEqual(entry.transport, "streamable-http")
+        self.assertEqual(entry.url, "https://mcp.acme.dev/${REGION}/mcp")
+        self.assertEqual(entry.headers, {"Authorization": "Bearer ${MCP_ACME_TOKEN}"})
+
     def test_stdio_entry_requires_command_argv_list(self):
         servers, errors = load_servers(
             text='{"servers": [{"name": "a/b", "transport": "stdio"}]}'
@@ -101,6 +119,16 @@ class PlaceholderTest(unittest.TestCase):
         )
         self.assertEqual(resolved["env"]["TOKEN"], "s3cret")
         self.assertEqual(resolved["url"], "https://mcp.example/cn/mcp")
+        self.assertEqual(missing, [])
+
+    def test_resolves_header_secrets(self):
+        resolved, missing = resolve_placeholders(
+            env={},
+            url="https://mcp.example/mcp",
+            headers={"Authorization": "Bearer ${MCP_ACME_TOKEN}"},
+            environ={"MCP_ACME_TOKEN": "tok"},
+        )
+        self.assertEqual(resolved["headers"]["Authorization"], "Bearer tok")
         self.assertEqual(missing, [])
 
     def test_unresolved_placeholder_reported(self):
@@ -248,6 +276,73 @@ class ManagerConnectTest(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             manager.build_tools()[0].run({"path": "a"})
         self.assertIn("磁盘错误", str(ctx.exception))
+
+    def test_call_reconnects_once_on_connection_drop(self):
+        """调用中断连（非工具语义错误）→ 自动重连一次并重试该次调用。"""
+
+        class DropSession(FakeMcpSession):
+            def call_tool(self, name, arguments):
+                self.calls.append((name, dict(arguments)))
+                raise RuntimeError("连接已断开")
+
+        first = DropSession(tools=[make_mcp_tool()])
+        second = FakeMcpSession(
+            tools=[make_mcp_tool()], results={"read_file": "恢复后结果"}
+        )
+        sessions = [first, second]
+        created = []
+
+        def factory(server):
+            created.append(server)
+            return sessions[len(created) - 1]
+
+        manager = McpManager([self.make_server()], client_factory=factory, environ={})
+        manager.connect()
+        tool = manager.build_tools()[0]
+        self.assertEqual(tool.run({"path": "a"}), "恢复后结果")
+        self.assertEqual(len(created), 2)  # 断连后恰好重连一次
+        self.assertTrue(first.closed)
+
+    def test_reconnect_failure_gives_chinese_error(self):
+        class DropSession(FakeMcpSession):
+            def call_tool(self, name, arguments):
+                raise RuntimeError("连接已断开")
+
+        created = []
+
+        def factory(server):
+            created.append(server)
+            if len(created) == 1:
+                return DropSession(tools=[make_mcp_tool()])
+            raise McpError("重连失败：端点不可达")
+
+        manager = McpManager([self.make_server()], client_factory=factory, environ={})
+        manager.connect()
+        with self.assertRaises(Exception) as ctx:
+            manager.build_tools()[0].run({"path": "a"})
+        self.assertIn("重连", str(ctx.exception))
+        self.assertIn("端点不可达", str(ctx.exception))
+
+    def test_remote_entry_connects_through_factory(self):
+        """streamable-http 条目走同一装配面（传输差异在 client factory 内消化）。"""
+        session = FakeMcpSession(
+            tools=[make_mcp_tool()], results={"read_file": "远程结果"}
+        )
+        manager = self.make_manager(
+            [
+                self.make_server(
+                    name="acme/remote",
+                    transport="streamable-http",
+                    command=(),
+                    url="https://mcp.acme.dev/mcp",
+                    headers={"Authorization": "Bearer tok"},
+                )
+            ],
+            session=session,
+        )
+        self.assertEqual(manager.connect(), [])
+        self.assertEqual(manager.build_tools()[0].run({"path": "a"}), "远程结果")
+        self.assertEqual(self.requested[0].headers["Authorization"], "Bearer tok")
 
     def test_close_releases_sessions(self):
         session = FakeMcpSession(tools=[make_mcp_tool()])

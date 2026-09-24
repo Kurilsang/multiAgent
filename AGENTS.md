@@ -41,8 +41,8 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 ## 当前状态与下一步
 
 - 已完成：三厂商对话、上下文截断、运行时切厂商、ReAct 单 Agent 循环（function calling + 工具/技能注册表）、CLI + WebUI 全链路流式 SSE、双层终止与死循环止损、思考链统一转写与展示（reasoning_content / 内联 `<think>` → ReasoningDelta）、对话导出（WebUI 导出按钮、CLI `/export`、HTTP `GET /export`）、技能市场（SKILL.md 文件化技能包、动态清单 + use_skill/search_skills/create_skill 元工具、聊天通道自主激活与 `/技能名` 前缀路由、Git/本地安装与启停删管理 API、WebUI `/` 弹层与市场视图）、技能在线目录（services/catalog 爬取服务隔离区：skills.sh HTML 降级 + LobeHub M2M 市场 API、SQLite 缓存 + 定时刷新、/market/* 代理、目录包安装 source=catalog、WebUI 在线浏览 + 单次确认卡）、MCP 进行中（#32-#34 已落：目录 schema 泛化 kind + 通用 manifest 合同、MCP 连接定义与启动装配 stdio 真协议闭环、观察值视图与旁存续读 read_tool_result）
-- 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`）或 `/技能名` 点名，无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复；第三方技能包是提示注入面（格式校验兜底，不做内容审计）；skills.sh 官方 API 为 OIDC 专属（走 HTML 降级，页面改版需跟进适配器）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；MCP 仅支持 stdio（远程 streamable-http 见 #36），mcpb 单文件包暂不可安装（见 #35），stdio 无沙箱（argv 直起、确认卡披露命令原文）
-- 下一步：MCP 市场剩余票（#35 Registry 适配器与安装来源、#36 远程接入、#37 管理面与聊天暴露、#38 WebUI 确认卡、#39 文档收口）、多 Agent 协作（状态机已留后门：新增状态与迁移边）、ClawHub 适配器与已验证源免确认白名单、`/` 弹层混入在线目录、多会话持久化、网关逻辑（路由/鉴权/审计）
+- 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`）或 `/技能名` 点名，无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复；第三方技能包是提示注入面（格式校验兜底，不做内容审计）；skills.sh 官方 API 为 OIDC 专属（走 HTML 降级，页面改版需跟进适配器）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；MCP 支持 stdio + streamable-http（sse 不做），mcpb 单文件包暂不可安装（见 #35），stdio 无沙箱（argv 直起、确认卡披露命令原文）
+- 下一步：MCP 市场剩余票（#35 Registry 适配器与安装来源、#37 管理面与聊天暴露、#38 WebUI 确认卡、#39 文档收口）、多 Agent 协作（状态机已留后门：新增状态与迁移边）、ClawHub 适配器与已验证源免确认白名单、`/` 弹层混入在线目录、多会话持久化、网关逻辑（路由/鉴权/审计）
 
 ## Agent skills
 

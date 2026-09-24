@@ -603,7 +603,7 @@ class InstallRequest(BaseModel):
     source_platform: str = ""
 
 
-# ---- 技能在线目录代理（/market/*）：主服务零外网，一切经爬取服务 ----
+# ---- 技能在线目录代理（/market/*）：目录通路零意外外网，一切经爬取服务 ----
 
 
 class _CatalogResponse:

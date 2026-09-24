@@ -1,4 +1,4 @@
-"""主服务在线目录代理与目录包安装测试：fake 爬取服务注入，主服务零外网。"""
+"""主服务在线目录代理与目录包安装测试：fake 爬取服务注入，目录安装路径零意外外网。"""
 
 import tempfile
 import unittest
@@ -13,7 +13,7 @@ from tests.test_server_stream import StubSettings
 
 
 class FakeCatalogHttp:
-    """爬取服务替身（server._catalog_client 注入点）；断言主服务零外网。"""
+    """爬取服务替身（server._catalog_client 注入点）；断言目录安装路径零意外外网。"""
 
     def __init__(self, routes=None):
         self.routes = list((routes or {}).items())

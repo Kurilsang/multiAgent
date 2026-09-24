@@ -46,7 +46,7 @@ _FM_DESC_RE = re.compile(r"^description:\s*(.+)$", re.M)
 def peek_manifest_meta(manifest: str) -> dict:
     """从 manifest frontmatter 宽松取 name/description（详情预览用）。
 
-    当前清单形态为 SKILL.md（frontmatter + 正文）；其他形态清单由适配器自理解。
+    当前 manifest 形态为 SKILL.md（frontmatter + 正文）；其他 manifest 形态由适配器自理解。
     """
     text = manifest or ""
     head = ""
@@ -189,7 +189,7 @@ class CatalogDetail:
 class CatalogPack:
     """目录包：安装所需的 manifest 文件集（平台分发差异在适配器内归一）。
 
-    manifest_path 指定清单文件（当前形态 SKILL.md）；kind 为资产类型（skill | mcp）。
+    manifest_path 指定 manifest 文件（当前形态 SKILL.md）；kind 为资产类型（skill | mcp）。
     """
 
     files: tuple[tuple[str, str], ...]  # (相对路径, 内容)；至少含 manifest_path 指定文件

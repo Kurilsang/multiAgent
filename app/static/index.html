@@ -913,7 +913,7 @@ async function installSkill(source, extra) {
   }
 }
 
-// ===== 在线目录（爬取服务经 /market/* 代理；主服务零外网） =====
+// ===== 在线目录（爬取服务经 /market/* 代理；目录通路零意外外网） =====
 const marketState = { q: '', source: '', page: 1, pageSize: 10 };
 let marketOnlineDisabled = false;
 let marketSourcesLoaded = false;

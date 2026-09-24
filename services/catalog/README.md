@@ -2,8 +2,7 @@
 
 > **⚠ 隔离边界（外网唯一通道）**
 >
-> - 本服务是整个系统**唯一**与外网目录/仓库交互的组件。主服务默认零外网（仅既有
->   Git URL 手装除外），一切目录浏览、SKILL.md 预览、目录包下载都经本服务。
+> - 本服务是整个系统**唯一**与外网目录/仓库交互的组件。主服务不直接外网抓取目录/仓库（既有 Git URL 手装除外），一切目录浏览、manifest 预览、目录包下载都经本服务；MCP 运行时连接是另一条用户显式配置的通路（SPEC-0003 网络边界决策），不属本隔离区。
 > - 本服务**零密钥、零技能包写权限**：不持有任何 LLM API Key，不写 `skills/`
 >   技能包目录；技能落盘永远发生在主服务的校验闸门之后。
 > - 外网数据**一律不可信**：入库前经 `schema.clean_text` 清洗（去控制字符、
@@ -31,7 +30,7 @@ GET  /health                  健康检查（app 身份标识 multiagent-catalog
 GET  /internal/sources        各源状态（last_refresh / entry_count / last_error / stale）
 GET  /internal/search         ?q=&source=&page=&page_size= 统一条目分页（读缓存；条目含 kind：skill|mcp）
 GET  /internal/detail         ?id=&source= 确认卡预览（manifest_path/manifest_text + 审计明细）
-GET  /internal/pack/{ref}     ?source= 目录包：manifest 文件集（manifest_path 指定清单文件）+ 附带文件清单
+GET  /internal/pack/{ref}     ?source= 目录包：manifest 文件集（manifest_path 指定 manifest 文件）+ 附带文件清单
 POST /internal/refresh        {"source"?: "..."} 一次爬取（逐源降级，单源失败不毁全局）
 ```
 

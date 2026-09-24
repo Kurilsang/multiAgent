@@ -4,8 +4,11 @@
 真协议锚点另见 test_mcp_anchor.py。
 """
 
+import json
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.mcp import (
     McpError,
@@ -350,6 +353,136 @@ class ManagerConnectTest(unittest.TestCase):
         manager.connect()
         manager.close()
         self.assertTrue(session.closed)
+
+
+class ManagerMutationTest(unittest.TestCase):
+    """管理面语义：启用即注册、禁用即摘除、删除出清单、重载重读文件（文件态唯一事实源）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.config = Path(self._tmp.name) / "servers.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write_config(self, payload):
+        self.config.write_text(json.dumps(payload), encoding="utf-8")
+
+    def make(self, server=None, session_tools=()):
+        from app.tools import ToolRegistry
+
+        self.registry = ToolRegistry()
+        self.created = []
+
+        def factory(server_def):
+            self.created.append(server_def)
+            return FakeMcpSession(
+                tools=list(session_tools) or [make_mcp_tool()],
+                results={"read_file": "文件内容"},
+            )
+
+        manager = McpManager(
+            [server or self.make_server()],
+            client_factory=factory,
+            environ={},
+            config_path=self.config,
+            registry=self.registry,
+        )
+        return manager
+
+    def make_server(self, **overrides):
+        values = dict(
+            name="io.github.acme/filesystem",
+            transport="stdio",
+            command=(sys.executable, "-m", "fixture_mcp_server"),
+        )
+        values.update(overrides)
+        return McpServer(**values)
+
+    TOOL = "mcp__io-github-acme-filesystem__read_file"
+
+    def test_disable_unregisters_tools_and_enable_reconnects(self):
+        self.write_config({"servers": [{"name": "io.github.acme/filesystem",
+                                        "transport": "stdio",
+                                        "command": [sys.executable, "-m", "x"]}]})
+        manager = self.make()
+        manager.connect()
+        self.assertIn(self.TOOL, self.registry.names())
+
+        manager.set_enabled("io.github.acme/filesystem", False)
+        self.assertNotIn(self.TOOL, self.registry.names())  # 禁用即摘除
+        self.assertEqual(manager.listing()[0]["status"], "disabled")
+
+        manager.set_enabled("io.github.acme/filesystem", True)  # 启用即注册 + 重连
+        self.assertIn(self.TOOL, self.registry.names())
+        self.assertEqual(len(self.created), 2)
+        self.assertEqual(manager.listing()[0]["status"], "connected")
+
+    def test_disable_persists_enabled_flag(self):
+        manager = self.make()
+        manager.connect()
+        manager.set_enabled("io.github.acme/filesystem", False)
+        saved, errors = load_servers(path=self.config)
+        self.assertEqual(errors, [])
+        self.assertFalse(saved[0].enabled)
+
+    def test_remove_deletes_entry_and_persists(self):
+        manager = self.make()
+        manager.connect()
+        manager.remove("io.github.acme/filesystem")
+        self.assertEqual(manager.listing(), [])
+        self.assertNotIn(self.TOOL, self.registry.names())
+        saved, errors = load_servers(path=self.config)
+        self.assertEqual((saved, errors), ([], []))
+
+    def test_reload_rereads_file_and_reports_errors(self):
+        manager = self.make()
+        manager.connect()
+        self.write_config(
+            {
+                "servers": [
+                    {"name": "a/new", "transport": "stdio", "command": [sys.executable, "-m", "y"]},
+                    {"transport": "stdio", "command": ["x"]},
+                ]
+            }
+        )
+        errors = manager.reload()
+        self.assertEqual([item["name"] for item in manager.listing()], ["a/new"])
+        self.assertTrue(errors and "无效" in errors[0])
+        self.assertIn("mcp__a-new__read_file", self.registry.names())
+        self.assertNotIn(self.TOOL, self.registry.names())
+
+    def test_enable_missing_server_reports(self):
+        manager = self.make()
+        with self.assertRaises(McpError):
+            manager.set_enabled("nope", True)
+
+    def test_enable_connect_failure_reported_but_stays_enabled(self):
+        from app.tools import ToolRegistry
+
+        self.write_config({"servers": [{"name": "io.github.acme/filesystem",
+                                        "transport": "stdio",
+                                        "command": [sys.executable, "-m", "x"],
+                                        "enabled": False}]})
+        self.registry = ToolRegistry()
+
+        def broken_factory(server_def):
+            raise McpError("连接失败：端点不可达")
+
+        manager = McpManager(
+            [self.make_server(enabled=False)],
+            client_factory=broken_factory,
+            environ={},
+            config_path=self.config,
+            registry=self.registry,
+        )
+        self.assertEqual(manager.connect(), [])  # disabled：不建连
+
+        item = manager.set_enabled("io.github.acme/filesystem", True)
+        self.assertEqual(item["status"], "error")
+        self.assertIn("连接失败", item["error"])
+        self.assertTrue(item["enabled"])  # 修复后可经启用/重载重连
+        self.assertNotIn(self.TOOL, self.registry.names())
 
 
 if __name__ == "__main__":

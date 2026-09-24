@@ -273,11 +273,15 @@ class McpManager:
         client_factory,
         environ: Mapping[str, str] | None = None,
         max_tools: int = 0,
+        config_path: Path | None = None,
+        registry=None,
     ):
         self._servers = list(servers)
         self._factory = client_factory
         self._environ = dict(environ if environ is not None else build_environ())
         self._max_tools = max_tools
+        self._config_path = Path(config_path) if config_path is not None else None
+        self._registry = registry
         self._sessions: dict[str, McpSession] = {}
         self._entries: dict[str, _ToolEntry] = {}
         self._statuses: dict[str, tuple[str, str]] = {}
@@ -375,6 +379,8 @@ class McpManager:
         )
         for entry in entries:
             self._entries[entry.full_name] = entry
+            if self._registry is not None:
+                self._registry.register(self._tool_for(entry))
         self._statuses[server.name] = ("connected", "")
 
     def _reject(self, name: str, message: str, errors: list[str]) -> None:
@@ -383,22 +389,20 @@ class McpManager:
 
     def build_tools(self) -> list["Tool"]:
         """把已建连工具包成注册表工具（func 路由回本管理器）。"""
+        return [self._tool_for(entry) for entry in self._entries.values()]
+
+    def _tool_for(self, entry: _ToolEntry) -> "Tool":
         from .tools import Tool
 
-        result = []
-        for full, entry in self._entries.items():
-            result.append(
-                Tool(
-                    name=full,
-                    description=entry.meta.get("description")
-                    or f"MCP 工具 {entry.meta.get('name')}（来自 {entry.server.name}）",
-                    parameters=entry.meta.get("parameters")
-                    or {"type": "object", "properties": {}, "required": []},
-                    func=_make_tool_func(self, full),
-                    max_observation_chars=entry.server.max_observation_chars,
-                )
-            )
-        return result
+        return Tool(
+            name=entry.full_name,
+            description=entry.meta.get("description")
+            or f"MCP 工具 {entry.meta.get('name')}（来自 {entry.server.name}）",
+            parameters=entry.meta.get("parameters")
+            or {"type": "object", "properties": {}, "required": []},
+            func=_make_tool_func(self, entry.full_name),
+            max_observation_chars=entry.server.max_observation_chars,
+        )
 
     def call_tool(self, full_name: str, arguments: dict) -> str:
         entry = self._entries.get(full_name)
@@ -481,6 +485,89 @@ class McpManager:
         self._sessions.clear()
         self._entries.clear()
 
+    # ---- 管理面：启用/禁用/删除/重载（文件态唯一事实源 + 即时注册表同步） ----
+
+    def set_enabled(self, name: str, enabled: bool) -> dict:
+        """启用/禁用服务：启用即建连注册、禁用即摘除；变更落盘。返回状态条目。"""
+        server = self._find(name)
+        if server is None:
+            raise McpError(f"未找到 MCP 服务: {name!r}")
+        if bool(server.enabled) != bool(enabled):
+            self._replace_server(replace(server, enabled=bool(enabled)))
+            self._persist()
+        if not enabled:
+            self._drop_server(name, status=("disabled", ""))
+            return self.listing_item(name)
+        if name not in self._sessions:
+            errors: list[str] = []
+            try:
+                self._connect_one(self._find(name), {}, {}, self._reserved())
+            except McpError as exc:
+                self._reject(name, str(exc), errors)
+                self.load_errors.extend(errors)
+        return self.listing_item(name)
+
+    def remove(self, name: str) -> None:
+        """删除服务：摘除工具、关会话、出清单并落盘。"""
+        if self._find(name) is None:
+            raise McpError(f"未找到 MCP 服务: {name!r}")
+        self._drop_server(name, status=("disabled", ""))
+        self._statuses.pop(name, None)
+        self._servers = [item for item in self._servers if item.name != name]
+        self._persist()
+
+    def reload(self) -> list[str]:
+        """重读连接定义文件并整体重连（外部手改文件后的生效入口）。"""
+        for name in [item.name for item in self._servers]:
+            self._drop_server(name, status=("disabled", ""))
+        self._statuses.clear()
+        servers, parse_errors = (
+            load_servers(path=self._config_path)
+            if self._config_path is not None
+            else ([], [])
+        )
+        self._servers = servers
+        self.load_errors = list(parse_errors)
+        self.connect(reserved=self._reserved())
+        return list(self.load_errors)
+
+    def listing_item(self, name: str) -> dict:
+        for item in self.listing():
+            if item["name"] == name:
+                return item
+        raise McpError(f"未找到 MCP 服务: {name!r}")
+
+    def _find(self, name: str) -> McpServer | None:
+        for server in self._servers:
+            if server.name == name:
+                return server
+        return None
+
+    def _replace_server(self, server: McpServer) -> None:
+        self._servers = [
+            server if item.name == server.name else item for item in self._servers
+        ]
+
+    def _reserved(self) -> set:
+        return set(self._registry.names()) if self._registry is not None else set()
+
+    def _drop_server(self, name: str, *, status: tuple[str, str]) -> None:
+        session = self._sessions.pop(name, None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        for full in [key for key, entry in self._entries.items() if entry.server.name == name]:
+            del self._entries[full]
+            if self._registry is not None:
+                self._registry.unregister(full)
+        self._resolved_servers.pop(name, None)
+        self._statuses[name] = status
+
+    def _persist(self) -> None:
+        save_servers(self._config_path, self._servers)
+
 
 def _make_tool_func(manager: McpManager, full_name: str):
     def run(**arguments) -> str:
@@ -493,6 +580,36 @@ def resolve_config_path(value: str, root: Path) -> Path:
     """连接定义文件路径：相对路径锚定项目根（对位 resolve_skills_dir 约定）。"""
     path = Path(value)
     return path if path.is_absolute() else Path(root) / path
+
+
+def save_servers(path: Path | None, servers: list[McpServer]) -> None:
+    """把连接定义写回文件（文件态唯一事实源的落盘面；管理面变更用）。"""
+    if path is None:
+        return
+    entries = []
+    for server in servers:
+        entry: dict = {"name": server.name, "transport": server.transport}
+        if server.command:
+            entry["command"] = list(server.command)
+        if server.url:
+            entry["url"] = server.url
+        if server.env:
+            entry["env"] = dict(server.env)
+        if server.headers:
+            entry["headers"] = dict(server.headers)
+        entry["enabled"] = server.enabled
+        if server.source and server.source != "local":
+            entry["source"] = server.source
+        if server.max_observation_chars is not None:
+            entry["max_observation_chars"] = server.max_observation_chars
+        if server.enabled_tools:
+            entry["enabled_tools"] = list(server.enabled_tools)
+        entries.append(entry)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(
+        json.dumps({"servers": entries}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 # ---- 默认 client factory：官方 mcp SDK 会话（stdio） ----

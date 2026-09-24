@@ -220,18 +220,17 @@ def main() -> int:
         read_tool_result_tool(observation_pool, chunk_size=settings.observation_max_chars)
     )
     # MCP 连接定义：建连并以 mcp__* 灌入注册表（技能包可声明其为依赖），再热加载技能包
-    mcp_servers, mcp_parse_errors = load_servers(
-        path=resolve_config_path(settings.mcp_config, PROJECT_ROOT)
-    )
+    mcp_config = resolve_config_path(settings.mcp_config, PROJECT_ROOT)
+    mcp_servers, mcp_parse_errors = load_servers(path=mcp_config)
     mcp = McpManager(
         mcp_servers,
         client_factory=sdk_client_factory,
         max_tools=settings.mcp_max_tools,
+        config_path=mcp_config,
+        registry=tool_registry,
     )
     for error in [*mcp_parse_errors, *mcp.connect(reserved=tool_registry.names())]:
         console.print(f"[yellow]MCP 加载警告：{escape(error)}[/yellow]")
-    for tool in mcp.build_tools():
-        tool_registry.register(tool)
     atexit.register(mcp.close)
     for error in skill_registry.reload():
         console.print(f"[yellow]技能加载警告：{escape(error)}[/yellow]")

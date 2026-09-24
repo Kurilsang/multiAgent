@@ -64,6 +64,10 @@ class ToolRegistry:
         except KeyError:
             raise KeyError(f"未注册的工具: {name!r}") from None
 
+    def unregister(self, name: str) -> None:
+        """摘除工具（禁用/删除 MCP 服务时用）；不存在即幂等跳过。"""
+        self._tools.pop(name, None)
+
     def names(self) -> list[str]:
         return sorted(self._tools)
 

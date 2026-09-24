@@ -16,6 +16,8 @@
     POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
     GET  /skills          已装技能列表（元数据 + 启停状态 + 启动加载错误）
     GET  /mcp             MCP 连接定义列表（状态 + 工具 + 加载错误）
+    POST /mcp/enable|disable|remove  启用/禁用/删除 MCP 服务 {"name": "..."}
+    POST /mcp/reload      重读连接定义并整体重连
     GET  /skills/presets  预设平台源清单（一键安装用）
     GET  /skills/{name}   技能详情（含 SKILL.md 原文）
     POST /skills/{name}/enable     启用技能
@@ -62,6 +64,7 @@ from .conversation import Conversation
 from .export import to_json, to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
 from .mcp import (
+    McpError,
     McpManager,
     load_servers,
     resolve_config_path,
@@ -117,11 +120,11 @@ def _build_wiring(
         servers,
         client_factory=mcp_client_factory or sdk_client_factory,
         max_tools=settings.mcp_max_tools,
+        config_path=mcp_config,
+        registry=tools,
     )
     mcp.load_errors.extend(mcp_parse_errors)
     mcp.connect(reserved=tools.names())
-    for tool in mcp.build_tools():
-        tools.register(tool)
     errors = skills.reload()
     engine = AgentEngine(
         llm,
@@ -342,11 +345,10 @@ def _chat_frames(req: ChatRequest, target) -> Iterator[str]:
                 }
             )
         messages.extend(conversation.messages_for_api())
-        schemas = [
-            tool_registry.get(name).openai_schema()
-            for name in (*SKILL_TOOL_NAMES, READ_TOOL_NAME)
-        ]
-        offered = set(SKILL_TOOL_NAMES) | {READ_TOOL_NAME}
+        mcp_names = [name for name in tool_registry.names() if name.startswith("mcp__")]
+        base_names = [*SKILL_TOOL_NAMES, READ_TOOL_NAME, *mcp_names]
+        schemas = [tool_registry.get(name).openai_schema() for name in base_names]
+        offered = set(base_names)
         try:
             for _ in range(settings.chat_max_tool_turns):
                 text_parts: list[str] = []
@@ -525,6 +527,50 @@ def list_mcp() -> dict:
         "servers": mcp_manager.listing(),
         "load_errors": list(mcp_manager.load_errors),
     }
+
+
+class McpActionRequest(BaseModel):
+    name: str = Field(min_length=1)
+
+
+def _mcp_set_enabled(name: str, enabled: bool) -> dict:
+    with _chat_lock:
+        try:
+            item = mcp_manager.set_enabled(name, enabled)
+        except McpError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"status": "ok", "server": item}
+
+
+@app.post("/mcp/enable")
+def enable_mcp(req: McpActionRequest) -> dict:
+    return _mcp_set_enabled(req.name, True)
+
+
+@app.post("/mcp/disable")
+def disable_mcp(req: McpActionRequest) -> dict:
+    return _mcp_set_enabled(req.name, False)
+
+
+@app.post("/mcp/remove")
+def remove_mcp(req: McpActionRequest) -> dict:
+    with _chat_lock:
+        try:
+            mcp_manager.remove(req.name)
+        except McpError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"status": "ok"}
+
+
+@app.post("/mcp/reload")
+def reload_mcp() -> dict:
+    with _chat_lock:
+        errors = mcp_manager.reload()  # 先重载再取列表（dict 按序求值）
+        return {
+            "status": "ok",
+            "servers": mcp_manager.listing(),
+            "load_errors": errors,
+        }
 
 
 # ---- 技能管理面 ----

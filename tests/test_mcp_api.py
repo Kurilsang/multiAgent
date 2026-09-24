@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 import app.server as server
 
-from tests.fakes import FakeMcpSession, make_mcp_tool
+from tests.fakes import FakeLLMClient, FakeMcpSession, make_mcp_tool, text_round, tool_round
 from tests.test_server_stream import StubSettings
 
 
@@ -128,6 +128,49 @@ class McpApiTest(unittest.TestCase):
         self.wire()  # 未写配置文件 = 空配置（不算错误）
         payload = self.client.get("/mcp").json()
         self.assertEqual(payload, {"servers": [], "load_errors": []})
+
+    def test_management_endpoints_flow(self):
+        self.write_config({"servers": [good_entry(env={})]})
+        self.wire()
+        name = "io.github.acme/filesystem"
+
+        resp = self.client.post("/mcp/disable", json={"name": name})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["server"]["status"], "disabled")
+        self.assertNotIn("mcp__io-github-acme-filesystem__read_file", server.tool_registry.names())
+
+        resp = self.client.post("/mcp/enable", json={"name": name})
+        self.assertEqual(resp.json()["server"]["status"], "connected")
+        self.assertIn("mcp__io-github-acme-filesystem__read_file", server.tool_registry.names())
+
+        self.write_config({"servers": []})
+        resp = self.client.post("/mcp/reload")
+        data = resp.json()
+        self.assertEqual(data["servers"], [])
+        self.assertEqual(data["load_errors"], [])
+
+        resp = self.client.post("/mcp/remove", json={"name": name})
+        self.assertEqual(resp.status_code, 404)  # 已不在清单
+
+    def test_chat_gate_allows_enabled_mcp_tools(self):
+        self.write_config({"servers": [good_entry(env={})]})
+        self.wire()
+        fake = FakeLLMClient(
+            [
+                tool_round("mcp__io-github-acme-filesystem__read_file", {"path": "a"}),
+                text_round("完成"),
+            ]
+        )
+        server.llm = fake
+        resp = self.client.post("/chat/stream", json={"message": "读一下"})
+        observations = [
+            json.loads(line[len("data: "):])
+            for line in resp.iter_lines()
+            if line.startswith("data: ")
+        ]
+        observation = next(f for f in observations if f.get("type") == "observation")
+        self.assertFalse(observation["is_error"])  # 闸门放行（非「未激活/未注册」）
+        self.assertEqual(observation["text"], "ok")
 
 
 if __name__ == "__main__":

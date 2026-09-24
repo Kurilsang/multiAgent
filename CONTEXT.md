@@ -78,7 +78,7 @@ _Avoid_: 安装包、压缩包
 _Avoid_: 插件、远程工具
 
 **连接定义(Connection Entry)**:
-一条 MCP 服务的声明式配置(名称/transport/命令 argv 或 endpoint/${VAR} 环境变量占位/启用位/工具白名单),存于 MCP_CONFIG 文件;文件态是唯一事实源,密钥只以占位符引用 .env。
+一条 MCP 服务的声明式配置(名称/transport/命令 argv 或 endpoint/${VAR} 环境变量与请求头占位/启用位/工具白名单),存于 MCP_CONFIG 文件;文件态是唯一事实源,密钥只以占位符引用 .env。
 _Avoid_: 配置项、安装包
 
 **观察值视图(Observation View)**:

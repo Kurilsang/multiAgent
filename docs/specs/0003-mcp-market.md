@@ -93,7 +93,7 @@ MCP 生态已有大量现成的工具服务器（GitHub、文件系统、数据�
 **信任模型**：一律单次确认卡（唯一人闸，与技能市场同构，不做多步审批）；本期不做免确认白名单、不做审计链路。徽标体系：Registry namespace 验证类型（GitHub/DNS/HTTP）→「官方源 · 发布者已验证」，title 提示「仅表示发布者身份经 Registry 验证，不代表代码经过安全审计」；`status=deprecated` 灰显 + 原因（statusMessage），`deleted` 不上架；既有审计徽标（AuditBadge）对 MCP 条目统一 unknown。
 
 **在线目录（爬取服务隔离区）**：
-- 新增官方 MCP Registry 适配器（唯一本期在线源）：匿名只读 API（`/v0.1/servers` 系列）、游标分页、search 仅名称子串、增量同步用 `updated_since` 水位（存入源状态）、详情路径参数 URL 编码、低频刷新（对齐官方聚合器预期，沿用现有刷新间隔配置）。Registry 处于 preview，适配器是唯一接触点，fixture 测试便于 schema 演进跟进。
+- 新增官方 MCP Registry 适配器（唯一本期在线源）：匿名只读 API（`/v0.1/servers` 系列）、游标分页、search 仅名称子串、增量同步用 `updated_since` 水位（存入源状态）、详情路径参数 URL 编码、低频刷新（对齐官方聚合器预期，沿用现有刷新间隔配置）。Registry 处于 preview，适配器是唯一接触点，fixture 测试便于 schema 演进跟进。（实现备注 2026-09-24：本期按全量游标拉取实现，`updated_since` 真增量待存储合并语义 + deleted tombstone 支持后启用——整批替换缓存模型下限页/半增量都会丢数据，见 #35 票评。）
 - schema 泛化：条目缓存加 `kind` 列（skill / mcp）；目录包与详情的技能专用字段（`skill_md`、SKILL.md 专用解析）改通用 manifest（manifest 路径 + 文本），改名直接替换、README 的 `/internal/*` 合同同步更新（两服务同仓同版本，无外部消费者）；清洗（去控制字符/压空白/截断）与「清洗不拒绝」的信任边界策略照旧。
 - 本期目录安装只装连接定义；`mcpb` 单文件包条目展示但标「暂不支持安装」（留安装坐标扩展点，后续需下载 + sha256 校验）。
 

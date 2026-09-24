@@ -44,10 +44,14 @@ def create_app(sources: dict, store: CatalogStore) -> FastAPI:
         return {"sources": sorted(known.values(), key=lambda item: item["source"])}
 
     @app.get("/internal/search")
-    def search(q: str = "", source: str = "", page: int = 1, page_size: int = 20) -> dict:
+    def search(
+        q: str = "", source: str = "", kind: str = "", page: int = 1, page_size: int = 20
+    ) -> dict:
         page = max(1, page)
         page_size = min(max(1, page_size), MAX_PAGE_SIZE)
-        items, total = store.search(q=q, source=source, page=page, page_size=page_size)
+        items, total = store.search(
+            q=q, source=source, kind=kind, page=page, page_size=page_size
+        )
         return {
             "items": [entry.to_dict() for entry in items],
             "total": total,

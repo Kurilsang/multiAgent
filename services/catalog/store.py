@@ -56,7 +56,7 @@ class CatalogStore(Protocol):
     def record_error(self, source: str, error: str) -> None: ...
 
     def search(
-        self, q: str = "", source: str = "", page: int = 1, page_size: int = 20
+        self, q: str = "", source: str = "", kind: str = "", page: int = 1, page_size: int = 20
     ) -> tuple[list[CatalogEntry], int]: ...
 
     def sources(self) -> list[dict]: ...
@@ -99,7 +99,7 @@ class MemoryStore:
         state["entry_count"] = len(self._entries.get(source, ()))
 
     def search(
-        self, q: str = "", source: str = "", page: int = 1, page_size: int = 20
+        self, q: str = "", source: str = "", kind: str = "", page: int = 1, page_size: int = 20
     ) -> tuple[list[CatalogEntry], int]:
         needle = q.strip().casefold()
         hits: list[CatalogEntry] = []
@@ -107,6 +107,8 @@ class MemoryStore:
             if source and name != source:
                 continue
             for entry in entries:
+                if kind and entry.kind != kind:
+                    continue
                 if needle and needle not in (
                     entry.name + "\n" + entry.description
                 ).casefold():
@@ -175,13 +177,16 @@ class SqliteStore:
             self._conn.commit()
 
     def search(
-        self, q: str = "", source: str = "", page: int = 1, page_size: int = 20
+        self, q: str = "", source: str = "", kind: str = "", page: int = 1, page_size: int = 20
     ) -> tuple[list[CatalogEntry], int]:
         where = []
         params: list = []
         if source:
             where.append("source = ?")
             params.append(source)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
         if q.strip():
             where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
             needle = f"%{q.strip().casefold()}%"

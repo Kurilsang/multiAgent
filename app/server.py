@@ -27,7 +27,7 @@
     POST /skills/install  安装 {"source": "git"|"local", "url"|"path": "...", "subpath": "..."}
     POST /skills/install  安装 {"source": "catalog"|"git"|"local", ...}
     GET  /market/sources  在线目录各源状态（爬取服务代理）
-    GET  /market/search   在线目录搜索 ?q=&source=&page=&page_size=
+    GET  /market/search   在线目录搜索 ?q=&source=&kind=&page=&page_size=
     GET  /market/detail   在线目录详情 ?id=&source=（SKILL.md 预览 + 审计徽标）
     POST /market/refresh  触发一次目录爬取 {"source"?: "..."}
     GET  /export          导出主对话历史，?format=markdown(默认)|json
@@ -838,12 +838,18 @@ def market_sources() -> dict:
 
 @app.get("/market/search")
 def market_search(
-    q: str = "", source: str = "", page: int = 1, page_size: int = 20
+    q: str = "", source: str = "", kind: str = "", page: int = 1, page_size: int = 20
 ) -> dict:
     return _market_proxy(
         "GET",
         "/internal/search",
-        params={"q": q, "source": source, "page": page, "page_size": page_size},
+        params={
+            "q": q,
+            "source": source,
+            "kind": kind,
+            "page": page,
+            "page_size": page_size,
+        },
     )
 
 

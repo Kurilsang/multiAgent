@@ -48,6 +48,22 @@ class CatalogAppTest(unittest.TestCase):
         resp = self.client.get("/internal/search", params={"source": "other"})
         self.assertEqual(resp.json()["total"], 0)
 
+    def test_search_filters_by_kind(self):
+        from services.catalog.schema import CatalogEntry
+
+        self.source.entries.append(
+            CatalogEntry(
+                id="io.x/y", name="n", description="d", source="fake", origin="o",
+                kind="mcp",
+            )
+        )
+        self.client.post("/internal/refresh", json={})
+        resp = self.client.get("/internal/search", params={"kind": "mcp"})
+        self.assertEqual(resp.json()["total"], 1)
+        self.assertEqual(resp.json()["items"][0]["id"], "io.x/y")
+        resp = self.client.get("/internal/search", params={"kind": "skill"})
+        self.assertEqual(resp.json()["total"], 5)
+
     def test_refresh_error_keeps_cache_and_marks_stale(self):
         self.client.post("/internal/refresh", json={})
         self.source.error = CatalogError("平台不可达", status=502)

@@ -159,6 +159,7 @@
     padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
   }
   .panel-box h2 { font-size: 14px; margin: 0; font-weight: 600; }
+  #installed-panel { display: flex; flex-direction: column; gap: 16px; }
   .install-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .install-row input {
     flex: 1; min-width: 180px; padding: 7px 10px; font-size: 13px; outline: none;
@@ -194,6 +195,8 @@
   .badge.pass { color: #3ecf6f; border-color: #3ecf6f; }
   .badge.warn { color: #e8b339; border-color: #e8b339; }
   .badge.fail { color: var(--error); border-color: var(--error); }
+  .badge.kind { color: var(--accent); border-color: var(--accent-2); }
+  .market-row.off { opacity: 0.6; }
   .market-row {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     padding: 8px 4px; border-bottom: 1px solid var(--border);
@@ -218,6 +221,22 @@
     white-space: pre-wrap; word-break: break-word;
   }
   .confirm-card pre[hidden] { display: none; }
+  #cf-caps:empty, #cf-form:empty, .cf-risk:empty { display: none; }
+  .cap-line { font-size: 12.5px; word-break: break-all; }
+  .cap-line.cmd {
+    font-family: Consolas, "Courier New", monospace;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .cf-risk {
+    color: #e8b339; font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word;
+    border: 1px solid #e8b339; border-radius: 8px; padding: 6px 10px;
+  }
+  #cf-form { display: flex; flex-direction: column; gap: 8px; }
+  .cf-field { display: flex; flex-direction: column; gap: 4px; }
+  .cf-field label { font-size: 12px; color: var(--muted); }
+  .cf-field input, .cf-field select { width: 100%; padding: 6px 10px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -228,7 +247,7 @@
     <select id="provider-select" title="选择厂商">
       <option value="">默认厂商</option>
     </select>
-    <button id="market-btn" title="查看已装技能、安装新技能">技能市场</button>
+    <button id="market-btn" title="查看与安装技能、MCP 服务">市场</button>
     <button id="export-btn" title="导出对话记录为 Markdown（含任务轨迹与错误，可直接粘贴给 AI）">导出</button>
     <button id="clear-btn" title="清空服务端对话上下文并清屏">清空</button>
   </header>
@@ -239,11 +258,14 @@
 
   <div id="skills-view">
     <div class="sub-tabs">
+      <button id="kind-skill" class="sub-tab active">技能</button>
+      <button id="kind-mcp" class="sub-tab">MCP 服务</button>
+      <span style="flex:1"></span>
       <button id="tab-installed" class="sub-tab active">已安装</button>
       <button id="tab-online" class="sub-tab">在线浏览</button>
     </div>
     <div id="installed-panel">
-      <div class="panel-box">
+      <div class="panel-box" id="skill-install-box">
         <h2>安装技能（手动）</h2>
         <div class="install-row">
           <select id="preset-select" title="预设平台源"><option value="">预设平台源…</option></select>
@@ -255,12 +277,21 @@
           <button id="install-git-btn">从 Git 安装</button>
           <button id="install-local-btn">本地导入</button>
         </div>
-        <div id="install-report"></div>
+      </div>
+      <div class="panel-box" id="mcp-install-box" style="display:none">
+        <h2>接入 MCP 服务（手动）</h2>
+        <div class="install-row">
+          <input id="mcp-import-path" placeholder="本地 server.json / mcp.json（服务器侧路径）">
+          <button id="mcp-import-btn">本地导入</button>
+          <button id="mcp-reload-btn" title="重读连接定义并整体重连（手改 mcp/servers.json 后生效）">重载</button>
+        </div>
+        <div class="skill-desc">连接定义可手写直改：密钥只以 ${VAR} 占位写入 .env；改完点「重载」生效。</div>
       </div>
       <div class="panel-box">
-        <h2>已安装技能</h2>
+        <h2 id="installed-title">已安装技能</h2>
+        <div id="install-report"></div>
         <div class="load-errors" id="load-errors"></div>
-        <div id="skills-list"></div>
+        <div id="installed-list"></div>
       </div>
     </div>
     <div id="online-panel" style="display:none">
@@ -288,6 +319,9 @@
       <div class="skill-head" id="cf-badges"></div>
       <div class="skill-desc" id="cf-desc"></div>
       <div class="badge" id="cf-origin"></div>
+      <div id="cf-caps"></div>
+      <div class="cf-risk" id="cf-risk"></div>
+      <div id="cf-form"></div>
       <div class="skill-actions">
         <button id="cf-preview-btn">查看 SKILL.md</button>
       </div>
@@ -750,7 +784,7 @@ async function exportChat() {
   toast(copied ? '已导出 .md 文件，并已复制到剪贴板' : '已导出 .md 文件（剪贴板不可用，请直接粘贴文件内容）');
 }
 
-// ===== 技能市场 =====
+// ===== 市场（统一市场：技能 / MCP 双类资产） =====
 let marketLoaded = false;
 
 function showView(view) {
@@ -758,14 +792,15 @@ function showView(view) {
   skillsViewEl.style.display = market ? 'flex' : 'none';
   chatEl.style.display = market ? 'none' : 'flex';
   document.querySelector('footer').style.display = market ? 'none' : 'flex';
-  marketBtn.textContent = market ? '返回聊天' : '技能市场';
-  if (market) loadMarket();
+  marketBtn.textContent = market ? '返回聊天' : '市场';
+  if (market) loadInstalled();
   else inputEl.focus();
 }
 
-async function loadMarket() {
+async function loadInstalled() {
+  if (marketState.kind === 'mcp') { await loadMcpList(); return; }
   const [data] = await Promise.all([fetchSkills(true), loadPresets()]);
-  const listEl = document.getElementById('skills-list');
+  const listEl = document.getElementById('installed-list');
   const errorsEl = document.getElementById('load-errors');
   errorsEl.textContent = (data.load_errors || []).join('\n');
   listEl.innerHTML = '';
@@ -779,12 +814,36 @@ async function loadMarket() {
   for (const s of data.skills) listEl.appendChild(skillCard(s));
 }
 
+async function loadMcpList() {
+  let data;
+  try {
+    const res = await fetch('/mcp');
+    data = await res.json();
+  } catch (e) {
+    data = { servers: [], load_errors: ['MCP 服务列表加载失败：' + e.message] };
+  }
+  const listEl = document.getElementById('installed-list');
+  const errorsEl = document.getElementById('load-errors');
+  errorsEl.textContent = (data.load_errors || []).join('\n');
+  listEl.innerHTML = '';
+  const servers = data.servers || [];
+  if (!servers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'skill-desc';
+    empty.textContent = '还没有 MCP 服务：在「在线浏览」里安装，或手写连接定义（mcp/servers.json）后点「重载」。';
+    listEl.appendChild(empty);
+    return;
+  }
+  for (const s of servers) listEl.appendChild(mcpCard(s));
+}
+
 function skillCard(s) {
   const card = document.createElement('div');
   card.className = 'skill-card' + (s.enabled ? '' : ' off');
 
   const head = document.createElement('div');
   head.className = 'skill-head';
+  head.appendChild(kindBadge('skill'));
   const name = document.createElement('span');
   name.className = 'skill-name';
   name.textContent = s.name;
@@ -841,7 +900,7 @@ function skillCard(s) {
       const res = await fetch('/skills/' + encodeURIComponent(s.name) + '/' + action, { method: 'POST' });
       if (!res.ok) throw new Error(await res.text());
       invalidateSkills();
-      await loadMarket();
+      await loadInstalled();
     } catch (e) { toast('操作失败：' + e.message); }
   });
   delBtn.addEventListener('click', async () => {
@@ -850,7 +909,106 @@ function skillCard(s) {
       const res = await fetch('/skills/' + encodeURIComponent(s.name), { method: 'DELETE' });
       if (!res.ok) throw new Error(await res.text());
       invalidateSkills();
-      await loadMarket();
+      await loadInstalled();
+    } catch (e) { toast('删除失败：' + e.message); }
+  });
+  return card;
+}
+
+function mcpCard(s) {
+  const card = document.createElement('div');
+  card.className = 'skill-card' + (s.enabled && s.status !== 'error' ? '' : ' off');
+
+  const head = document.createElement('div');
+  head.className = 'skill-head';
+  head.appendChild(kindBadge('mcp'));
+  const name = document.createElement('span');
+  name.className = 'skill-name';
+  name.textContent = s.name;
+  const transport = document.createElement('span');
+  transport.className = 'badge';
+  transport.textContent = s.transport;
+  const status = document.createElement('span');
+  status.className = 'badge' + (s.status === 'connected' ? ' pass' : s.status === 'error' ? ' fail' : '');
+  status.textContent = s.status === 'connected' ? '已连接' : s.status === 'error' ? '连接失败' : '已禁用';
+  if (s.status === 'error') status.title = s.error || '';
+  const source = document.createElement('span');
+  source.className = 'badge';
+  source.textContent = s.source + (s.enabled ? '' : ' · 已禁用');
+  head.appendChild(name);
+  head.appendChild(transport);
+  head.appendChild(status);
+  head.appendChild(source);
+  card.appendChild(head);
+
+  const desc = document.createElement('div');
+  desc.className = 'skill-desc';
+  desc.textContent = s.transport === 'stdio'
+    ? '命令: ' + (s.command || []).join(' ')
+    : 'Endpoint: ' + (s.url || '');
+  card.appendChild(desc);
+  if (s.status === 'error' && s.error) {
+    const err = document.createElement('div');
+    err.className = 'load-errors';
+    err.textContent = s.error;
+    card.appendChild(err);
+  }
+
+  const tools = document.createElement('div');
+  tools.className = 'badge';
+  tools.textContent = '工具: ' + ((s.tools || []).join('、') || '（无）');
+  card.appendChild(tools);
+  const keys = (s.env_keys || []).concat(s.header_keys || []);
+  const vars = document.createElement('div');
+  vars.className = 'badge';
+  vars.textContent = '配置变量（值只存 .env）: ' + (keys.join('、') || '（无）');
+  card.appendChild(vars);
+
+  const actions = document.createElement('div');
+  actions.className = 'skill-actions';
+  const viewBtn = document.createElement('button');
+  viewBtn.textContent = '查看';
+  const toggleBtn = document.createElement('button');
+  toggleBtn.textContent = s.enabled ? '禁用' : '启用';
+  const delBtn = document.createElement('button');
+  delBtn.className = 'danger';
+  delBtn.textContent = '删除';
+  actions.appendChild(viewBtn);
+  actions.appendChild(toggleBtn);
+  actions.appendChild(delBtn);
+  card.appendChild(actions);
+
+  const pre = document.createElement('pre');
+  pre.hidden = true;
+  card.appendChild(pre);
+
+  viewBtn.addEventListener('click', () => {
+    if (!pre.hidden) { pre.hidden = true; return; }
+    pre.textContent = [
+      'name: ' + s.name,
+      'transport: ' + s.transport,
+      s.transport === 'stdio'
+        ? 'command: ' + (s.command || []).join(' ')
+        : 'url: ' + (s.url || ''),
+      'source: ' + s.source,
+      'status: ' + s.status + (s.error ? '（' + s.error + '）' : ''),
+      'env: ' + ((s.env_keys || []).join('、') || '（无）'),
+      'headers: ' + ((s.header_keys || []).join('、') || '（无）'),
+      'tools: ' + ((s.tools || []).join('、') || '（无）'),
+    ].join('\n');
+    pre.hidden = false;
+  });
+  toggleBtn.addEventListener('click', async () => {
+    try {
+      await postJson('/mcp/' + (s.enabled ? 'disable' : 'enable'), { name: s.name });
+      await loadInstalled();
+    } catch (e) { toast('操作失败：' + e.message); }
+  });
+  delBtn.addEventListener('click', async () => {
+    if (!confirm('删除 MCP 服务「' + s.name + '」？（连接定义从配置文件移除）')) return;
+    try {
+      await postJson('/mcp/remove', { name: s.name });
+      await loadInstalled();
     } catch (e) { toast('删除失败：' + e.message); }
   });
   return card;
@@ -877,6 +1035,31 @@ function installReport(lines) {
   document.getElementById('install-report').textContent = lines.join('\n');
 }
 
+// 逐条 ✓/↷/✗ + ⚠ 警告——技能与 MCP 安装报告同形态（渲染纯文本防注入）
+function renderInstallReport(data) {
+  const marks = { installed: '✓', skipped: '↷', invalid: '✗' };
+  installReport(
+    ['来源: ' + data.source].concat(
+      (data.results || []).map((r) => (marks[r.status] || '·') + ' ' + r.name + (r.detail ? ' — ' + r.detail : ' — ' + r.status)),
+      (data.warnings || []).map((w) => '⚠ ' + w)
+    )
+  );
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail = typeof (data && data.detail) === 'string' ? data.detail : 'HTTP ' + res.status;
+    throw new Error(detail);
+  }
+  return data;
+}
+
 async function installSkill(source, extra) {
   const body = Object.assign({ source }, extra || {});
   if (source === 'git') {
@@ -899,25 +1082,59 @@ async function installSkill(source, extra) {
       installReport(['安装失败：' + detail]);
       return;
     }
-    const marks = { installed: '✓', skipped: '↷', invalid: '✗' };
-    installReport(
-      ['来源: ' + data.source].concat(
-        data.results.map((r) => (marks[r.status] || '·') + ' ' + r.name + (r.detail ? ' — ' + r.detail : ' — ' + r.status)),
-        (data.warnings || []).map((w) => '⚠ ' + w)
-      )
-    );
+    renderInstallReport(data);
     invalidateSkills();
-    await loadMarket();
+    await loadInstalled();
+  } catch (e) {
+    installReport(['安装失败：' + e.message]);
+  }
+}
+
+async function installMcp(extra) {
+  const body = Object.assign({}, extra || {});
+  if (body.source === 'local') {
+    body.path = document.getElementById('mcp-import-path').value.trim();
+  }
+  installReport(['安装中…（安装为连接定义；包由运行器运行时拉取，本期不落盘）']);
+  try {
+    const data = await postJson('/mcp/install', body);
+    renderInstallReport(data);
+    await loadInstalled();
   } catch (e) {
     installReport(['安装失败：' + e.message]);
   }
 }
 
 // ===== 在线目录（爬取服务经 /market/* 代理；目录通路零意外外网） =====
-const marketState = { q: '', source: '', page: 1, pageSize: 10 };
+const marketState = { q: '', source: '', kind: 'skill', page: 1, pageSize: 10 };
 let marketOnlineDisabled = false;
 let marketSourcesLoaded = false;
 let confirmEntry = null;
+let confirmPreview = null; // install_preview（MCP 能力声明 + 密钥声明）
+let confirmManifestText = null; // manifest 全文缓存（确认卡预览用）
+
+function kindBadge(kind) {
+  const el = document.createElement('span');
+  el.className = 'badge kind';
+  el.textContent = kind === 'mcp' ? 'MCP' : '技能';
+  return el;
+}
+
+function verifiedBadge() {
+  const el = document.createElement('span');
+  el.className = 'badge pass';
+  el.textContent = '官方源 · 发布者已验证';
+  el.title = '仅表示发布者身份经 Registry 验证，不代表代码经过安全审计';
+  return el;
+}
+
+function deprecatedBadge(item) {
+  const el = document.createElement('span');
+  el.className = 'badge warn';
+  el.textContent = '已弃用';
+  el.title = item.status_message || '';
+  return el;
+}
 
 function auditBadge(a) {
   const el = document.createElement('span');
@@ -935,6 +1152,21 @@ function showSubTab(which) {
   document.getElementById('tab-installed').classList.toggle('active', !online);
   document.getElementById('tab-online').classList.toggle('active', online);
   if (online) loadMarketOnline();
+}
+
+// 资产类型切换（技能 / MCP）：已安装与在线浏览双面板同步换轨
+function showKind(kind) {
+  marketState.kind = kind === 'mcp' ? 'mcp' : 'skill';
+  const mcp = marketState.kind === 'mcp';
+  document.getElementById('kind-skill').classList.toggle('active', !mcp);
+  document.getElementById('kind-mcp').classList.toggle('active', mcp);
+  document.getElementById('skill-install-box').style.display = mcp ? 'none' : '';
+  document.getElementById('mcp-install-box').style.display = mcp ? '' : 'none';
+  document.getElementById('installed-title').textContent = mcp ? '已安装 MCP 服务' : '已安装技能';
+  installReport([]);
+  marketState.page = 1;
+  loadInstalled();
+  if (document.getElementById('online-panel').style.display !== 'none') loadMarketOnline();
 }
 
 async function loadMarketSources() {
@@ -958,7 +1190,7 @@ async function loadMarketOnline() {
   if (marketOnlineDisabled) return;
   await loadMarketSources();
   const params = new URLSearchParams({
-    q: marketState.q, source: marketState.source,
+    q: marketState.q, source: marketState.source, kind: marketState.kind,
     page: String(marketState.page), page_size: String(marketState.pageSize),
   });
   let data;
@@ -995,21 +1227,33 @@ function renderMarketRows(data) {
   if (!(data.items || []).length) {
     const empty = document.createElement('div');
     empty.className = 'skill-desc';
-    empty.textContent = '没有匹配的在线技能（换个关键词，或点「刷新目录」）。';
+    empty.textContent = '没有匹配的在线条目（换个关键词，或点「刷新目录」）。';
     list.appendChild(empty);
     return;
   }
   for (const item of data.items) {
+    const kind = item.kind || 'skill';
+    const deprecated = item.status === 'deprecated';
     const row = document.createElement('div');
-    row.className = 'market-row';
+    row.className = 'market-row' + (deprecated ? ' off' : '');
+    row.appendChild(kindBadge(kind));
     const name = document.createElement('span');
     name.className = 'skill-name';
     name.textContent = item.name;
+    row.appendChild(name);
     const source = document.createElement('span');
     source.className = 'badge';
-    source.textContent = item.source + ' · ' + (item.installs || 0) + ' 安装' + (item.validated ? ' · 已验证' : '');
-    row.appendChild(name);
+    source.textContent = item.source + ' · ' + (item.installs || 0) + ' 安装'
+      + (item.validated && kind !== 'mcp' ? ' · 已验证' : '');
     row.appendChild(source);
+    if (item.validated && kind === 'mcp') row.appendChild(verifiedBadge());
+    if (deprecated) row.appendChild(deprecatedBadge(item));
+    if (kind === 'mcp' && (item.tags || []).indexOf('mcpb') >= 0) {
+      const mc = document.createElement('span');
+      mc.className = 'badge warn';
+      mc.textContent = 'mcpb · 暂不支持安装';
+      row.appendChild(mc);
+    }
     if (item.is_duplicate) {
       const dup = document.createElement('span');
       dup.className = 'badge warn';
@@ -1019,7 +1263,8 @@ function renderMarketRows(data) {
     for (const a of (item.audits || [])) row.appendChild(auditBadge(a));
     const desc = document.createElement('span');
     desc.className = 'skill-desc';
-    desc.textContent = item.description || item.origin || '';
+    desc.textContent = (item.description || item.origin || '')
+      + (deprecated && item.status_message ? '（已弃用：' + item.status_message + '）' : '');
     row.appendChild(desc);
     const installBtn = document.createElement('button');
     installBtn.textContent = '安装';
@@ -1031,26 +1276,174 @@ function renderMarketRows(data) {
 
 function openConfirm(item) {
   confirmEntry = item;
+  confirmPreview = null;
+  confirmManifestText = null;
+  const kind = item.kind || 'skill';
   document.getElementById('cf-name').textContent = item.name;
-  document.getElementById('cf-desc').textContent = item.description || '（暂无描述，以 SKILL.md 预览为准）';
+  document.getElementById('cf-desc').textContent = (item.description
+    || (kind === 'mcp' ? '（暂无描述，以 server.json 预览为准）' : '（暂无描述，以 SKILL.md 预览为准）'))
+    + (item.status === 'deprecated' && item.status_message ? '（已弃用：' + item.status_message + '）' : '');
   document.getElementById('cf-origin').textContent = '来源: ' + item.source + ' · ' + (item.origin || item.id);
   const badges = document.getElementById('cf-badges');
   badges.innerHTML = '';
+  badges.appendChild(kindBadge(kind));
   const stat = document.createElement('span');
   stat.className = 'badge';
-  stat.textContent = (item.installs || 0) + ' 安装' + (item.stars ? ' · ★' + item.stars : '') + (item.validated ? ' · 已验证' : '');
+  stat.textContent = (item.installs || 0) + ' 安装' + (item.stars ? ' · ★' + item.stars : '')
+    + (item.validated && kind !== 'mcp' ? ' · 已验证' : '');
   badges.appendChild(stat);
+  if (item.validated && kind === 'mcp') badges.appendChild(verifiedBadge());
+  if (item.status === 'deprecated') badges.appendChild(deprecatedBadge(item));
   for (const a of (item.audits || [])) badges.appendChild(auditBadge(a));
+  document.getElementById('cf-caps').innerHTML = '';
+  document.getElementById('cf-form').innerHTML = '';
+  document.getElementById('cf-risk').textContent = '';
   const preview = document.getElementById('cf-preview');
   preview.hidden = true;
   preview.textContent = '';
+  document.getElementById('cf-preview-btn').textContent = kind === 'mcp' ? '查看 server.json' : '查看 SKILL.md';
+  const installBtn = document.getElementById('cf-install');
+  installBtn.disabled = false;
   document.getElementById('confirm-mask').hidden = false;
+  if (kind === 'mcp') {
+    // 能力声明与密钥表单就绪前不允许确认（单次确认 = 安装 + 密钥收集）
+    installBtn.disabled = true;
+    loadConfirmCapability(item);
+  }
 }
 
-async function previewSkillMd() {
+async function loadConfirmCapability(item) {
+  const caps = document.getElementById('cf-caps');
+  const loading = document.createElement('div');
+  loading.className = 'cap-line';
+  loading.textContent = '能力声明加载中…（经爬取服务取详情）';
+  caps.appendChild(loading);
+  try {
+    const params = new URLSearchParams({ id: item.install_ref || item.id, source: item.source });
+    const res = await fetch('/market/detail?' + params);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+    if (confirmEntry !== item) return; // 卡片已关闭或已换条目
+    confirmManifestText = data.manifest_text || '';
+    let manifest = {};
+    try { manifest = JSON.parse(confirmManifestText); } catch (e) { manifest = {}; }
+    confirmPreview = manifest.install_preview || null;
+    renderCapability(manifest);
+    document.getElementById('cf-install').disabled = !(confirmPreview && confirmPreview.transport);
+  } catch (e) {
+    if (confirmEntry !== item) return;
+    caps.innerHTML = '';
+    const err = document.createElement('div');
+    err.className = 'load-errors';
+    err.textContent = '能力声明加载失败：' + e.message + '（无法确认能力与密钥，禁止安装）';
+    caps.appendChild(err);
+    document.getElementById('cf-install').disabled = true;
+  }
+}
+
+function renderCapability(manifest) {
+  const caps = document.getElementById('cf-caps');
+  caps.innerHTML = '';
+  const form = document.getElementById('cf-form');
+  form.innerHTML = '';
+  const risk = document.getElementById('cf-risk');
+  risk.textContent = '';
+  const preview = confirmPreview || {};
+  const addLine = (text, mono) => {
+    const line = document.createElement('div');
+    line.className = 'cap-line' + (mono ? ' cmd' : '');
+    line.textContent = text;
+    caps.appendChild(line);
+  };
+  if (preview.transport === 'stdio') {
+    addLine('拼装后命令原文（argv 直起子进程，不经 shell）:');
+    addLine((preview.command || []).join(' '), true);
+    addLine('宿主运行器: ' + (preview.runtime_hint || '（无，需完整路径）'));
+    risk.textContent = '确认 = 授权本机执行该命令';
+  } else if (preview.transport === 'streamable-http') {
+    addLine('Endpoint（streamable-http）:');
+    addLine(preview.url || '', true);
+    addLine('域名: ' + hostOf(preview.url || ''));
+    risk.textContent = '确认 = 授权本服务连接该远程端点并发送所填密钥';
+  } else {
+    addLine('暂不支持安装：' + (preview.reason || '条目无可安装形态'));
+  }
+  const repo = manifest.repository && manifest.repository.url;
+  if (repo) addLine('仓库: ' + repo);
+  // 密钥/环境变量表单：按结构化声明渲染（isSecret 走密码框，choices 走下拉）
+  const decls = (preview.env || []).concat(preview.headers || []);
+  for (const decl of decls) form.appendChild(cfField(decl));
+  if (decls.length) {
+    const note = document.createElement('div');
+    note.className = 'skill-desc';
+    note.textContent = '密钥值只写入 .env，连接定义仅存 ${VAR} 占位；留空按空值配置。';
+    form.appendChild(note);
+  }
+}
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch (e) { return '（无法解析）'; }
+}
+
+function cfField(decl) {
+  const wrap = document.createElement('div');
+  wrap.className = 'cf-field';
+  const label = document.createElement('label');
+  label.textContent = decl.name
+    + (decl.isRequired ? '（必填）' : '')
+    + (decl.isSecret ? '（密钥）' : '');
+  wrap.appendChild(label);
+  let input;
+  if ((decl.choices || []).length) {
+    input = document.createElement('select');
+    if (!decl.isRequired) {
+      const blank = document.createElement('option');
+      blank.value = '';
+      blank.textContent = '（留空）';
+      input.appendChild(blank);
+    }
+    for (const choice of decl.choices) {
+      const opt = document.createElement('option');
+      opt.value = choice;
+      opt.textContent = choice;
+      input.appendChild(opt);
+    }
+    input.value = decl.default || '';
+  } else {
+    input = document.createElement('input');
+    input.type = decl.isSecret ? 'password' : 'text';
+    input.value = decl.default || '';
+    input.placeholder = decl.isSecret ? '（写入 .env，不进连接定义）' : '';
+  }
+  input.dataset.var = decl.var;
+  input.dataset.name = decl.name;
+  if (decl.isRequired) input.dataset.required = '1';
+  wrap.appendChild(input);
+  return wrap;
+}
+
+// 收集密钥/环境变量值：键 = ${VAR} 占位名；必填留空则给出缺失项
+function collectEnvValues() {
+  const values = {};
+  for (const input of document.querySelectorAll('#cf-form [data-var]')) {
+    const value = input.value;
+    if (input.dataset.required === '1' && !value.trim()) {
+      return { missing: input.dataset.name };
+    }
+    values[input.dataset.var] = value;
+  }
+  return { values };
+}
+
+async function toggleCfPreview() {
   if (!confirmEntry) return;
   const pre = document.getElementById('cf-preview');
+  if (!pre.hidden) { pre.hidden = true; return; }
   pre.hidden = false;
+  if ((confirmEntry.kind || 'skill') === 'mcp' && confirmManifestText !== null) {
+    pre.textContent = confirmManifestText || '（无内容）';
+    return;
+  }
   pre.textContent = '预览加载中…（目录包经爬取服务获取）';
   try {
     const params = new URLSearchParams({ id: confirmEntry.install_ref || confirmEntry.id, source: confirmEntry.source });
@@ -1067,6 +1460,27 @@ async function previewSkillMd() {
 async function confirmInstall() {
   if (!confirmEntry) return;
   const entry = confirmEntry;
+  if ((entry.kind || 'skill') === 'mcp') {
+    if (!confirmPreview || !confirmPreview.transport) {
+      toast('该条目暂不支持安装');
+      return;
+    }
+    const collected = collectEnvValues();
+    if (collected.missing) {
+      toast('请填写必填项：' + collected.missing);
+      return;
+    }
+    confirmEntry = null;
+    document.getElementById('confirm-mask').hidden = true;
+    showSubTab('installed');
+    await installMcp({
+      source: 'catalog',
+      catalog_id: entry.install_ref || entry.id,
+      source_platform: entry.source,
+      env_values: collected.values,
+    });
+    return;
+  }
   confirmEntry = null;
   document.getElementById('confirm-mask').hidden = true;
   showSubTab('installed');
@@ -1089,8 +1503,18 @@ document.getElementById('preset-select').addEventListener('change', (e) => {
     document.getElementById('install-sub').value = opt.dataset.subpath || '';
   }
 });
+document.getElementById('kind-skill').addEventListener('click', () => showKind('skill'));
+document.getElementById('kind-mcp').addEventListener('click', () => showKind('mcp'));
 document.getElementById('tab-installed').addEventListener('click', () => showSubTab('installed'));
 document.getElementById('tab-online').addEventListener('click', () => showSubTab('online'));
+document.getElementById('mcp-import-btn').addEventListener('click', () => installMcp({ source: 'local' }));
+document.getElementById('mcp-reload-btn').addEventListener('click', async () => {
+  try {
+    await postJson('/mcp/reload', {});
+    toast('已重载连接定义');
+    await loadInstalled();
+  } catch (e) { toast('重载失败：' + e.message); }
+});
 document.getElementById('market-search-btn').addEventListener('click', () => {
   marketState.q = document.getElementById('market-q').value.trim();
   marketState.page = 1;
@@ -1125,7 +1549,7 @@ document.getElementById('market-refresh-btn').addEventListener('click', async ()
   marketState.page = 1;
   loadMarketOnline();
 });
-document.getElementById('cf-preview-btn').addEventListener('click', previewSkillMd);
+document.getElementById('cf-preview-btn').addEventListener('click', toggleCfPreview);
 document.getElementById('cf-cancel').addEventListener('click', () => {
   document.getElementById('confirm-mask').hidden = true;
   confirmEntry = null;

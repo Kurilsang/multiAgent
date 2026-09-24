@@ -37,6 +37,25 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(self.store.search(source="b")[1], 2)
         self.assertEqual(self.store.search(q="zzz")[1], 0)
 
+    def test_search_filters_by_kind(self):
+        from services.catalog.schema import CatalogEntry
+
+        self.store.replace_source("a", make_catalog_entries(2, source="a"), "t1")
+        self.store.replace_source(
+            "b",
+            [
+                CatalogEntry(
+                    id="io.x/y", name="n", description="d", source="b", origin="o",
+                    kind="mcp",
+                )
+            ],
+            "t1",
+        )
+        self.assertEqual(self.store.search(kind="mcp")[1], 1)
+        self.assertEqual(self.store.search(kind="mcp")[0][0].id, "io.x/y")
+        self.assertEqual(self.store.search(kind="skill")[1], 2)
+        self.assertEqual(self.store.search(kind="")[1], 3)
+
     def test_audit_tags_roundtrip(self):
         from services.catalog.schema import AuditBadge, CatalogEntry
 
@@ -116,6 +135,27 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertFalse(state["stale"])
         self.assertEqual(state["entry_count"], 2)
         self.assertEqual(self.store.refreshed_at(), "t2")
+
+
+class MemoryStoreSearchTest(unittest.TestCase):
+    def test_search_filters_by_kind(self):
+        from services.catalog.schema import CatalogEntry
+
+        store = MemoryStore()
+        store.replace_source("a", make_catalog_entries(2, source="a"), "t1")
+        store.replace_source(
+            "b",
+            [
+                CatalogEntry(
+                    id="io.x/y", name="n", description="d", source="b", origin="o",
+                    kind="mcp",
+                )
+            ],
+            "t1",
+        )
+        self.assertEqual(store.search(kind="mcp")[1], 1)
+        self.assertEqual(store.search(kind="skill")[1], 2)
+        self.assertEqual(store.search(kind="")[1], 3)
 
 
 class CredsStoreTest(unittest.TestCase):

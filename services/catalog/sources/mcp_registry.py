@@ -12,6 +12,7 @@ source_state.last_refresh）；ServerJSON 原样作 manifest（server.json）交
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import quote
 
 from ..schema import CatalogDetail, CatalogEntry, CatalogError, CatalogPack
@@ -59,7 +60,7 @@ class McpRegistrySource:
         return entries
 
     def detail(self, ref: str) -> CatalogDetail:
-        """确认卡数据源：ServerJSON + install_preview（拼装后的命令模板/endpoint）。"""
+        """确认卡数据源：ServerJSON + install_preview（命令模板/endpoint + 密钥声明）。"""
         data = self._json(self._get(self._detail_url(ref)), "详情")
         entry = self._to_entry(data)
         if entry is None:
@@ -149,7 +150,12 @@ class McpRegistrySource:
 
 
 def _install_preview(server: dict) -> dict:
-    """确认卡用「拼装后的命令模板/endpoint」摘要（与主服务合成逻辑同形，跨边界各自维护）。"""
+    """确认卡用「拼装后的命令模板/endpoint + 密钥声明」摘要。
+
+    与主服务合成逻辑同形、跨边界各自维护（对位 app/mcp.py
+    _entry_from_server_json/_command_from_package）：声明项的 var 即连接定义
+    里的 `${VAR}` 占位名，确认卡按它收集 env_values。
+    """
     packages = [item for item in server.get("packages") or [] if isinstance(item, dict)]
     package = next(
         (item for item in packages if item.get("registryType") != "mcpb"), None
@@ -177,14 +183,58 @@ def _install_preview(server: dict) -> dict:
                 argv.append(str(arg["name"]))
             if value:
                 argv.append(value)
-        return {"transport": "stdio", "command": argv, "runtime_hint": hint}
+        return {
+            "transport": "stdio",
+            "command": argv,
+            "runtime_hint": hint,
+            "env": _declarations(package.get("environmentVariables"), header=False),
+        }
     remotes = [item for item in server.get("remotes") or [] if isinstance(item, dict)]
     remote = next(
         (item for item in remotes if item.get("type") == "streamable-http"), None
     )
     if remote is not None:
-        return {"transport": "streamable-http", "url": str(remote.get("url") or "")}
-    return {"transport": None}
+        return {
+            "transport": "streamable-http",
+            "url": str(remote.get("url") or ""),
+            "headers": _declarations(remote.get("headers"), header=True),
+        }
+    if packages:
+        return {"transport": None, "reason": "mcpb 单文件包暂不支持安装"}
+    if remotes:
+        return {"transport": None, "reason": "仅 sse 远程（协议已废弃），暂不支持"}
+    return {"transport": None, "reason": "条目无可安装形态（无 packages/remotes）"}
+
+
+def _declarations(decls, *, header: bool) -> list[dict]:
+    """结构化密钥/环境变量声明（确认卡表单数据源）。
+
+    字段沿用 Registry 原名（isRequired/isSecret/default/choices），var 为
+    `${VAR}` 占位名：环境变量用声明名原样，请求头清洗大写（对位 app/mcp.py）。
+    """
+    out: list[dict] = []
+    for decl in decls or []:
+        if not isinstance(decl, dict):
+            continue
+        name = str(decl.get("name") or "")
+        var = re.sub(r"[^A-Za-z0-9_]", "_", name).upper() if header else name
+        if not name or not var:
+            continue
+        out.append(
+            {
+                "name": name,
+                "var": var,
+                "isRequired": bool(decl.get("isRequired")),
+                "isSecret": bool(decl.get("isSecret")),
+                "default": (
+                    "" if decl.get("default") is None else str(decl.get("default"))
+                ),
+                "choices": [
+                    str(item) for item in decl.get("choices") or [] if str(item)
+                ],
+            }
+        )
+    return out
 
 
 def _default_client():

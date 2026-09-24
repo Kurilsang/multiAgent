@@ -1,0 +1,41 @@
+{
+  "server": {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "io.github.acme/remote-db",
+    "description": "远程数据库查询工具",
+    "title": "Acme 远程数据库",
+    "version": "2.0.0",
+    "repository": {"url": "https://github.com/acme/remote-db", "source": "github"},
+    "websiteUrl": "https://acme.dev/db",
+    "packages": [],
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.acme.dev/db/mcp",
+        "headers": [
+          {
+            "name": "Authorization",
+            "description": "Bearer 访问密钥",
+            "isRequired": true,
+            "isSecret": true,
+            "default": "Bearer changeme"
+          },
+          {
+            "name": "X-API-Key",
+            "description": "备用密钥",
+            "isRequired": false,
+            "isSecret": true,
+            "choices": ["key-a", "key-b"]
+          }
+        ]
+      }
+    ]
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "isLatest": true,
+      "publishedAt": "2026-09-02T00:00:00Z"
+    }
+  }
+}

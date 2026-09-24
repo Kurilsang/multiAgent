@@ -112,6 +112,17 @@ class MarketApiTest(unittest.TestCase):
         )
         self.assertEqual(self.client.post("/market/refresh", json={}).json(), {"results": []})
 
+    def test_market_search_forwards_kind_filter(self):
+        """统一市场按资产类型分栏检索：kind 参数原样转发爬取服务。"""
+        fake = FakeCatalogHttp(
+            {"/internal/search": FakeCatalogResponse({"items": [], "total": 0})}
+        )
+        server._catalog_client = lambda: fake
+        self.client.get("/market/search", params={"kind": "mcp"})
+        method, path, kwargs = fake.calls[0]
+        self.assertEqual((method, path), ("GET", "/internal/search"))
+        self.assertEqual(kwargs["params"]["kind"], "mcp")
+
     def test_disabled_when_base_url_empty(self):
         server.settings.catalog_base_url = ""
         resp = self.client.get("/market/sources")

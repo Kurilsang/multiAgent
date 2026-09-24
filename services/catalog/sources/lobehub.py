@@ -178,7 +178,7 @@ class LobeHubSource:
     def detail(self, ref: str) -> CatalogDetail:
         """确认卡预览：从 ZIP 包取 manifest（SKILL.md）全文（审计以列表条目的 isValidated 为准）。"""
         pack = self.fetch_pack(ref)
-        skill_md = next(text for path, text in pack.files if path.endswith("SKILL.md"))
+        skill_md = next(text for path, text in pack.files if path == pack.manifest_path)
         meta = peek_manifest_meta(skill_md)
         entry = CatalogEntry.from_raw(
             {

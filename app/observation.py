@@ -17,7 +17,11 @@ READ_TOOL_NAME = "read_tool_result"
 
 
 class ResultPool:
-    """截断观察值的完整文本池：确定性句柄（r1、r2…）+ LRU 淘汰。"""
+    """截断观察值的完整文本池：确定性句柄（r1、r2…）+ LRU 淘汰。
+
+    容量按 UTF-8 字节数计账（中文 3 字节/字符）；刚旁存的条目永不参与
+    淘汰——「凡截断必可续读」是硬保证，哪怕单条就超上限。
+    """
 
     def __init__(self, max_bytes: int = DEFAULT_POOL_MAX_BYTES):
         self._max_bytes = max_bytes
@@ -25,14 +29,18 @@ class ResultPool:
         self._bytes = 0
         self._counter = 0
 
+    @staticmethod
+    def _size(text: str) -> int:
+        return len(text.encode("utf-8"))
+
     def put(self, text: str) -> str:
         self._counter += 1
         handle = f"r{self._counter}"
         self._items[handle] = text
-        self._bytes += len(text)
-        while self._bytes > self._max_bytes and self._items:
+        self._bytes += self._size(text)
+        while self._bytes > self._max_bytes and len(self._items) > 1:
             _oldest, evicted = self._items.popitem(last=False)
-            self._bytes -= len(evicted)
+            self._bytes -= self._size(evicted)
         return handle
 
     def get(self, handle: str) -> str | None:

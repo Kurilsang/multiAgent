@@ -131,7 +131,7 @@ class SkillsShSource:
     def detail(self, ref: str) -> CatalogDetail:
         """确认卡预览：manifest（SKILL.md）全文（git 拉取）+ 详情页审计徽标。"""
         pack = self.fetch_pack(ref)
-        skill_md = next(text for path, text in pack.files if path.endswith("SKILL.md"))
+        skill_md = next(text for path, text in pack.files if path == pack.manifest_path)
         meta = peek_manifest_meta(skill_md)
         entry = CatalogEntry.from_raw(
             {

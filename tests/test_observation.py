@@ -135,6 +135,18 @@ class ResultPoolEvictionTest(unittest.TestCase):
         self.assertIsNone(pool.get(h1))
         self.assertEqual(pool.get(h2), "b" * 60)
 
+    def test_byte_cap_counts_utf8_bytes(self):
+        pool = ResultPool(max_bytes=100)
+        h1 = pool.put("中" * 20)  # 60 字节（20 字符）
+        pool.put("中" * 20)  # 累计 120 字节 > 100：淘汰 h1
+        self.assertIsNone(pool.get(h1))
+
+    def test_oversized_single_result_survives_cap(self):
+        """刚旁存的结果必可续读：单条超上限不得把自己淘汰（凡截断必可续读）。"""
+        pool = ResultPool(max_bytes=10)
+        handle = pool.put("a" * 600)
+        self.assertEqual(pool.get(handle), "a" * 600)
+
     def test_evicted_handle_reads_as_stale(self):
         pool = ResultPool(max_bytes=100)
         tool = read_tool_result_tool(pool, chunk_size=50)

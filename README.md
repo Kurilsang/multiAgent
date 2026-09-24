@@ -176,6 +176,8 @@ tests/
 
 技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）；`CATALOG_BASE_URL` 指向技能在线目录爬取服务（默认 `http://127.0.0.1:8100`，留空则关闭在线目录并隐藏入口）。爬取服务自身配置（`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` / `CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`）见 [services/catalog/README.md](services/catalog/README.md)。
 
+MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）。
+
 如需按厂商覆盖接入端点，设置 `<厂商>_BASE_URL`（如 `GLM_BASE_URL`）。典型场景：GLM Coding Plan 套餐 Key 只对编码专用端点生效，需设置 `GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`，否则标准端点会报 1113 余额不足。
 
 ## 三厂商 function calling 冒烟
@@ -201,7 +203,7 @@ python -m unittest discover tests -v
 
 - 单会话内存上下文：服务重启后历史与任务轨迹清空；接口内部已加锁串行化，适合单用户/低并发使用
 - Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
-- MCP 工具接入未实现：工具注册表已预留适配位（远端工具灌入同一注册表即可）
+- MCP 接入当前仅支持 stdio（远程 streamable-http 未实现，见 #36）；mcpb 单文件包条目暂不支持安装（见 #35）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
 - SSE 断连后任务不恢复，页面重开需重新发起
@@ -209,7 +211,7 @@ python -m unittest discover tests -v
 ## 后续规划
 
 - 多 Agent 协作（评审者/执行者分工，复用状态机引擎）
-- MCP 工具适配器
+- MCP 市场后续票：官方 Registry 目录适配器与浏览点装、远程 streamable-http 接入、WebUI 统一市场与单次确认卡（#35-#39）
 - 技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub API）、zip 上传、版本与更新检查
 - 多会话管理与持久化
 - 网关特化逻辑（路由、鉴权、审计）

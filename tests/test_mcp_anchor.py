@@ -34,5 +34,45 @@ class StdioAnchorTest(unittest.TestCase):
             manager.close()
 
 
+@unittest.skipUnless(MCP_AVAILABLE, "需要官方 mcp SDK")
+class StreamableHttpAnchorTest(unittest.TestCase):
+    """远程传输真锚点：真实 HTTP 传输层也被执行过（防依赖漂移教训复发）。"""
+
+    def test_initialize_list_and_call_over_real_http(self):
+        import socket
+        import subprocess
+        import time
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        proc = subprocess.Popen([sys.executable, str(FIXTURE), str(port)])
+        try:
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                        break
+                except OSError:
+                    time.sleep(0.2)
+            server = McpServer(
+                name="test/remote-echo",
+                transport="streamable-http",
+                url=f"http://127.0.0.1:{port}/mcp",
+            )
+            manager = McpManager([server], client_factory=sdk_client_factory)
+            try:
+                self.assertEqual(manager.connect(), [])
+                tools = manager.build_tools()
+                self.assertEqual(
+                    [t.name for t in tools], ["mcp__test-remote-echo__echo"]
+                )
+                self.assertEqual(tools[0].run({"text": "你好"}), "echo:你好")
+            finally:
+                manager.close()
+        finally:
+            proc.terminate()
+
+
 if __name__ == "__main__":
     unittest.main()

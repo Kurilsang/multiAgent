@@ -32,7 +32,7 @@ class McpRegistrySourceTest(unittest.TestCase):
         return McpRegistrySource(client=self.client)
 
     def test_crawl_follows_cursor_and_maps_status(self):
-        entries = self.make_source().crawl(max_pages=5)
+        entries = self.make_source().crawl()  # 默认全量：翻到 cursor 耗尽
         ids = [entry.id for entry in entries]
         self.assertEqual(
             ids,
@@ -65,6 +65,11 @@ class McpRegistrySourceTest(unittest.TestCase):
         self.assertIn("packages", payload)
         self.assertEqual(
             payload["packages"][0]["environmentVariables"][0]["isSecret"], True
+        )
+        # 拼装后的命令模板（确认卡要展示的命令原文）
+        self.assertEqual(payload["install_preview"]["transport"], "stdio")
+        self.assertEqual(
+            payload["install_preview"]["command"], ["npx", "-y", "@acme/mcp-fs@1.2.3"]
         )
         # 详情路径参数 URL 编码（reverse-DNS 含 /）
         self.assertTrue(

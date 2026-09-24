@@ -31,10 +31,16 @@ class McpRegistrySource:
     def __init__(self, settings=None, creds_store=None, client=None):
         self._client = client
 
-    def crawl(self, max_pages: int = 3) -> list[CatalogEntry]:
+    def crawl(self, max_pages: int = 0) -> list[CatalogEntry]:
+        """全量游标拉取（max_pages=0 = 翻到 cursor 耗尽，硬上限 200 页防失控）。
+
+        缓存模型是整批替换，必须全量——限页会把未爬到的条目清出目录。
+        updated_since 真增量（含 deleted tombstone）待 store 支持合并后启用。
+        """
         entries: list[CatalogEntry] = []
         cursor = ""
-        for _ in range(max(1, max_pages)):
+        limit = max_pages if max_pages and max_pages > 0 else 200
+        for _ in range(limit):
             url = f"{BASE_URL}/v0.1/servers?limit={PAGE_SIZE}&version=latest"
             if cursor:
                 url += f"&cursor={quote(cursor, safe='')}"
@@ -53,15 +59,16 @@ class McpRegistrySource:
         return entries
 
     def detail(self, ref: str) -> CatalogDetail:
-        """确认卡数据源：ServerJSON 原样作 manifest（含包/远程与密钥声明）。"""
+        """确认卡数据源：ServerJSON + install_preview（拼装后的命令模板/endpoint）。"""
         data = self._json(self._get(self._detail_url(ref)), "详情")
         entry = self._to_entry(data)
         if entry is None:
             raise CatalogError(f"条目已下架（deleted）：{ref}", 404)
         server = data.get("server") or {}
+        manifest = {**server, "install_preview": _install_preview(server)}
         return CatalogDetail(
             entry=entry,
-            manifest_text=json.dumps(server, ensure_ascii=False, indent=2),
+            manifest_text=json.dumps(manifest, ensure_ascii=False, indent=2),
             manifest_path="server.json",
         )
 
@@ -139,6 +146,45 @@ class McpRegistrySource:
             },
             source=McpRegistrySource.name,
         )
+
+
+def _install_preview(server: dict) -> dict:
+    """确认卡用「拼装后的命令模板/endpoint」摘要（与主服务合成逻辑同形，跨边界各自维护）。"""
+    packages = [item for item in server.get("packages") or [] if isinstance(item, dict)]
+    package = next(
+        (item for item in packages if item.get("registryType") != "mcpb"), None
+    )
+    if package is not None:
+        argv: list[str] = []
+        hint = str(package.get("runtimeHint") or "").strip()
+        if hint:
+            argv.append(hint)
+        for arg in package.get("runtimeArguments") or []:
+            value = str(arg.get("value") or "") if isinstance(arg, dict) else ""
+            if value:
+                argv.append(value)
+        identifier = str(package.get("identifier") or "").strip()
+        version = str(package.get("version") or "").strip()
+        if identifier:
+            argv.append(f"{identifier}@{version}" if version else identifier)
+        for arg in package.get("packageArguments") or []:
+            if not isinstance(arg, dict):
+                continue
+            value = str(arg.get("value") or "")
+            if "{" in value and "}" in value:
+                continue
+            if arg.get("type") == "named" and arg.get("name"):
+                argv.append(str(arg["name"]))
+            if value:
+                argv.append(value)
+        return {"transport": "stdio", "command": argv, "runtime_hint": hint}
+    remotes = [item for item in server.get("remotes") or [] if isinstance(item, dict)]
+    remote = next(
+        (item for item in remotes if item.get("type") == "streamable-http"), None
+    )
+    if remote is not None:
+        return {"transport": "streamable-http", "url": str(remote.get("url") or "")}
+    return {"transport": None}
 
 
 def _default_client():

@@ -201,6 +201,19 @@ def build_environ(dotenv_path: Path | None = None, environ: Mapping[str, str] | 
     return values
 
 
+def _redact_url(url: str) -> str:
+    """展示脱敏：去掉 userinfo/query/fragment（密钥可能藏于其中），保留域名与路径。"""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url or "")
+    if not parts.scheme:
+        return url
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def short_server_name(name: str) -> str:
     """全名清洗为 function name 安全前缀（非法字符 → -，如 io.github.a/b → io-github-a-b）。"""
     return _UNSAFE_CHARS.sub("-", name)
@@ -461,7 +474,7 @@ class McpManager:
                     "name": server.name,
                     "transport": server.transport,
                     "command": list(server.command),
-                    "url": server.url,
+                    "url": _redact_url(server.url),
                     "source": server.source,
                     "enabled": server.enabled,
                     "env_keys": sorted(server.env),
@@ -921,9 +934,17 @@ class _SdkSessionBase:
 
     def call_tool(self, name: str, arguments: dict) -> str:
         session = self._require_session()
-        result = _loop_thread().submit(
-            session.call_tool(name, arguments)
-        ).result(_CALL_TIMEOUT)
+        try:
+            result = _loop_thread().submit(
+                session.call_tool(name, arguments)
+            ).result(_CALL_TIMEOUT)
+        except McpError:
+            raise
+        except Exception as exc:  # SDK 语义错误译成应用错误（不触发断连重试）
+            error = _as_app_error(exc)
+            if error is exc:
+                raise
+            raise error from exc
         texts = [
             getattr(block, "text", "")
             for block in (getattr(result, "content", None) or [])
@@ -994,6 +1015,17 @@ def _default_environment() -> dict:
         return dict(get_default_environment())
     except ImportError:  # pragma: no cover - SDK 版本差异兜底
         return dict(os.environ)
+
+
+def _as_app_error(exc: Exception) -> Exception:
+    """SDK 侧语义错误（RPC 拒绝/参数错误）译成应用 McpError——不属断连，不重试。"""
+    try:
+        from mcp.shared.exceptions import MCPError as _SdkMcpError
+    except ImportError:  # pragma: no cover - SDK 版本差异兜底
+        return exc
+    if isinstance(exc, _SdkMcpError):
+        return McpError(f"工具调用被服务端拒绝：{exc}")
+    return exc
 
 
 def sdk_client_factory(server: McpServer) -> McpSession:

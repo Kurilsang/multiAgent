@@ -21,7 +21,7 @@ python -m services.catalog                          # 默认 127.0.0.1:8100
 ```
 
 配置（环境变量）：`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` /
-`CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`（详见 docs/specs/0002-skill-catalog.md）。
+`CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`（默认 `skills-sh,lobehub,mcp-registry`；详见 docs/specs/0002-skill-catalog.md）。
 
 ## 接口（/internal/* 窄合同）
 

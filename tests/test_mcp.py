@@ -347,6 +347,44 @@ class ManagerConnectTest(unittest.TestCase):
         self.assertEqual(manager.build_tools()[0].run({"path": "a"}), "远程结果")
         self.assertEqual(self.requested[0].headers["Authorization"], "Bearer tok")
 
+    def test_tool_semantic_error_does_not_reconnect(self):
+        """工具语义错误（应用 McpError）不重连不重试——副作用不重复执行。"""
+
+        class RefusingSession(FakeMcpSession):
+            def call_tool(self, name, arguments):
+                self.calls.append((name, dict(arguments)))
+                raise McpError("工具返回错误：参数非法")
+
+        session = RefusingSession(tools=[make_mcp_tool()])
+        created = []
+
+        def factory(server_def):
+            created.append(server_def)
+            return session
+
+        manager = McpManager([self.make_server()], client_factory=factory, environ={})
+        manager.connect()
+        with self.assertRaises(McpError):
+            manager.build_tools()[0].run({"path": "a"})
+        self.assertEqual(len(created), 1)  # 恰好一次建连，无重试
+        self.assertEqual(len(session.calls), 1)
+
+    def test_listing_redacts_url_secrets(self):
+        session = FakeMcpSession(tools=[make_mcp_tool()])
+        manager = self.make_manager(
+            [
+                self.make_server(
+                    name="acme/remote",
+                    transport="streamable-http",
+                    command=(),
+                    url="https://user:pass@mcp.acme.dev/mcp?token=abc#x",
+                )
+            ],
+            session=session,
+        )
+        manager.connect()
+        self.assertEqual(manager.listing()[0]["url"], "https://mcp.acme.dev/mcp")
+
     def test_close_releases_sessions(self):
         session = FakeMcpSession(tools=[make_mcp_tool()])
         manager = self.make_manager([self.make_server()], session=session)

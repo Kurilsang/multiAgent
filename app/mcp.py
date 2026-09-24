@@ -531,6 +531,27 @@ class McpManager:
         self.connect(reserved=self._reserved())
         return list(self.load_errors)
 
+    def install(
+        self, server: McpServer, environ_update: Mapping[str, str] | None = None
+    ) -> tuple[str, str]:
+        """安装一条连接定义：落盘 + 立即建连注册（同名跳过）。返回 (状态, 说明)。"""
+        if self._find(server.name) is not None:
+            return "skipped", "同名服务已存在"
+        if environ_update:  # 新写入的密钥并入解析环境：装了即用，不等重启
+            self._environ.update(
+                {str(key): str(value) for key, value in environ_update.items()}
+            )
+        self._servers.append(server)
+        self._persist()
+        errors: list[str] = []
+        try:
+            self._connect_one(server, {}, {}, self._reserved())
+        except McpError as exc:
+            self._reject(server.name, str(exc), errors)
+            self.load_errors.extend(errors)
+            return "installed", f"已写入连接定义；连接失败：{exc}"
+        return "installed", "已写入连接定义并生效"
+
     def listing_item(self, name: str) -> dict:
         for item in self.listing():
             if item["name"] == name:
@@ -610,6 +631,196 @@ def save_servers(path: Path | None, servers: list[McpServer]) -> None:
         json.dumps({"servers": entries}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def write_dotenv(path: Path | None, values: Mapping[str, str]) -> None:
+    """把密钥值写入 .env（连接定义只留 ${VAR} 占位；已存在键原地更新）。"""
+    if path is None or not values:
+        return
+    target = Path(path)
+    lines = target.read_text(encoding="utf-8").splitlines() if target.is_file() else []
+    updated = {str(key): str(value) for key, value in values.items()}
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line else ""
+        if key and key in updated:
+            out.append(f"{key}={updated[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    for key, value in updated.items():
+        if key not in seen:
+            out.append(f"{key}={value}")
+    target.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def parse_install_text(
+    text: str, *, source: str
+) -> tuple[list[tuple[str, "McpServer | None", str]], list[str]]:
+    """安装内容 → 连接定义候选：兼容 server.json（Registry ServerJSON）与 mcp.json。
+
+    返回 ([(名称, 条目或 None, 错误说明)], 警告列表)；逐条语义对位技能安装报告。
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise McpError(f"安装内容不是有效 JSON：{exc.msg}") from exc
+    if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
+        return _entries_from_mcp_json(data, source=source), []
+    if isinstance(data, dict) and isinstance(data.get("servers"), list):
+        items = data["servers"]
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = [data]
+    candidates: list[tuple[str, "McpServer | None", str]] = []
+    warnings: list[str] = []
+    for item in items:
+        raw = item if isinstance(item, dict) else {}
+        name = str(raw.get("name") or "") or "(无名条目)"
+        server, error, item_warnings = _entry_from_server_json(raw, source=source)
+        warnings.extend(item_warnings)
+        candidates.append((name, server, error))
+    return candidates, warnings
+
+
+def _entry_from_server_json(
+    data: dict, *, source: str
+) -> tuple["McpServer | None", str, list[str]]:
+    """ServerJSON → 连接定义：包坐标合成 runner 命令模板，或取远程 endpoint。"""
+    warnings: list[str] = []
+    name = str(data.get("name") or "").strip()
+    if not name:
+        return None, "缺 name（server 全名）", warnings
+    packages = [item for item in data.get("packages") or [] if isinstance(item, dict)]
+    package = next(
+        (item for item in packages if item.get("registryType") != "mcpb"), None
+    )
+    if package is not None:
+        command = _command_from_package(package, warnings)
+        if not command:
+            return None, "无法合成命令模板（缺包坐标）", warnings
+        env = {
+            str(decl.get("name")): f"${{{decl.get('name')}}}"
+            for decl in package.get("environmentVariables") or []
+            if isinstance(decl, dict) and decl.get("name")
+        }
+        return (
+            McpServer(
+                name=name,
+                transport="stdio",
+                command=tuple(command),
+                env=env,
+                source=source,
+            ),
+            "",
+            warnings,
+        )
+    remotes = [item for item in data.get("remotes") or [] if isinstance(item, dict)]
+    remote = next(
+        (item for item in remotes if item.get("type") == "streamable-http"), None
+    )
+    if remote is not None:
+        url = str(remote.get("url") or "").strip()
+        if not url:
+            return None, "远程条目缺 url", warnings
+        headers = {}
+        for decl in remote.get("headers") or []:
+            header = str(decl.get("name") or "")
+            var = re.sub(r"[^A-Za-z0-9_]", "_", header).upper()
+            if header and var:
+                headers[header] = f"${{{var}}}"
+        return (
+            McpServer(
+                name=name,
+                transport="streamable-http",
+                url=url,
+                headers=headers,
+                source=source,
+            ),
+            "",
+            warnings,
+        )
+    if packages:
+        return (
+            None,
+            "mcpb 单文件包暂不支持安装",
+            warnings + [f"{name}: 附带可执行物的 mcpb 包本期不落盘"],
+        )
+    if remotes:
+        return None, "仅 sse 远程（协议已废弃），暂不支持", warnings
+    return None, "条目无可安装形态（无 packages/remotes）", warnings
+
+
+def _command_from_package(package: dict, warnings: list[str]) -> list[str]:
+    """包坐标 → runner 命令模板（官方 schema 无现成命令串，客户端拼装；不经 shell）。"""
+    argv: list[str] = []
+    hint = str(package.get("runtimeHint") or "").strip()
+    if hint:
+        argv.append(hint)
+    for arg in package.get("runtimeArguments") or []:
+        value = str(arg.get("value") or "") if isinstance(arg, dict) else ""
+        if value:
+            argv.append(value)
+    identifier = str(package.get("identifier") or "").strip()
+    if not identifier:
+        return []
+    version = str(package.get("version") or "").strip()
+    argv.append(f"{identifier}@{version}" if version else identifier)
+    for arg in package.get("packageArguments") or []:
+        if not isinstance(arg, dict):
+            continue
+        value = str(arg.get("value") or "")
+        if "{" in value and "}" in value:
+            warnings.append(f"参数含变量占位已跳过：{value}")
+            continue
+        if arg.get("type") == "named" and arg.get("name"):
+            argv.append(str(arg["name"]))
+        if value:
+            argv.append(value)
+    return argv
+
+
+def _entries_from_mcp_json(data: dict, *, source: str):
+    """mcp.json（{"mcpServers": {...}} 客户端惯用格式）→ 连接定义候选。"""
+    candidates = []
+    for name, config in (data.get("mcpServers") or {}).items():
+        config = config if isinstance(config, dict) else {}
+        command = config.get("command")
+        args = config.get("args") or []
+        if isinstance(command, list):
+            argv = [str(item) for item in command]
+        elif command:
+            argv = [str(command), *[str(item) for item in args]]
+        else:
+            argv = []
+        env = {str(k): str(v) for k, v in (config.get("env") or {}).items()}
+        headers = {str(k): str(v) for k, v in (config.get("headers") or {}).items()}
+        url = str(config.get("url") or "")
+        if argv:
+            server = McpServer(
+                name=str(name),
+                transport="stdio",
+                command=tuple(argv),
+                env=env,
+                headers=headers,
+                source=source,
+            )
+            candidates.append((str(name), server, ""))
+        elif url:
+            server = McpServer(
+                name=str(name),
+                transport="streamable-http",
+                url=url,
+                env=env,
+                headers=headers,
+                source=source,
+            )
+            candidates.append((str(name), server, ""))
+        else:
+            candidates.append((str(name), None, "缺 command 与 url"))
+    return candidates
 
 
 # ---- 默认 client factory：官方 mcp SDK 会话（stdio） ----

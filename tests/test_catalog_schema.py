@@ -80,6 +80,28 @@ class EntryKindTest(unittest.TestCase):
         self.assertEqual(entry.to_dict()["kind"], "mcp")
 
 
+class EntryStatusTest(unittest.TestCase):
+    """状态字段：deprecated 灰显（含原因），deleted 由适配器剔除不上架。"""
+
+    def test_status_defaults_active(self):
+        entry = CatalogEntry.from_raw({"id": "a/b", "name": "n"}, source="fake")
+        self.assertEqual((entry.status, entry.status_message), ("active", ""))
+        self.assertEqual(entry.to_dict()["status"], "active")
+
+    def test_deprecated_passes_through_with_message(self):
+        entry = CatalogEntry.from_raw(
+            {
+                "id": "a/b",
+                "name": "n",
+                "status": " deprecated ",
+                "status_message": "改用 com.x/y",
+            },
+            source="fake",
+        )
+        self.assertEqual(entry.status, "deprecated")
+        self.assertIn("改用", entry.to_dict()["status_message"])
+
+
 class AuditBadgeTest(unittest.TestCase):
     def test_status_normalized_to_known_set(self):
         self.assertEqual(AuditBadge.from_raw({"status": "FAIL"}).status, "fail")

@@ -38,11 +38,13 @@ def build_sources(settings, creds_factory=None) -> dict[str, CatalogSource]:
     __main__ 注入，测试注入 dict 即可。
     """
     from .lobehub import LobeHubSource
+    from .mcp_registry import McpRegistrySource
     from .skills_sh import SkillsShSource
 
     registry = {
         SkillsShSource.name: SkillsShSource,
         LobeHubSource.name: LobeHubSource,
+        McpRegistrySource.name: McpRegistrySource,
     }
     sources: dict[str, CatalogSource] = {}
     for name in settings.sources:

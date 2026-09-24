@@ -17,13 +17,15 @@ class CatalogSettings:
     port: int = 8100
     db_path: Path = CATALOG_ROOT / "catalog.db"
     refresh_hours: float = 6.0
-    sources: tuple[str, ...] = ("skills-sh", "lobehub")
+    sources: tuple[str, ...] = ("skills-sh", "lobehub", "mcp-registry")
 
     @classmethod
     def from_env(cls) -> "CatalogSettings":
         sources = tuple(
             name.strip()
-            for name in os.environ.get("CATALOG_SOURCES", "skills-sh,lobehub").split(",")
+            for name in os.environ.get(
+                "CATALOG_SOURCES", "skills-sh,lobehub,mcp-registry"
+            ).split(",")
             if name.strip()
         )
         return cls(
@@ -33,5 +35,5 @@ class CatalogSettings:
                 os.environ.get("CATALOG_DB", str(CATALOG_ROOT / "catalog.db"))
             ),
             refresh_hours=float(os.environ.get("CATALOG_REFRESH_HOURS", "6")),
-            sources=sources or ("skills-sh", "lobehub"),
+            sources=sources or ("skills-sh", "lobehub", "mcp-registry"),
         )

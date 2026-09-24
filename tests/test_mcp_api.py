@@ -10,7 +10,15 @@ from fastapi.testclient import TestClient
 
 import app.server as server
 
-from tests.fakes import FakeLLMClient, FakeMcpSession, make_mcp_tool, text_round, tool_round
+from tests.fakes import (
+    FakeLLMClient,
+    FakeMcpSession,
+    load_catalog_fixture,
+    make_mcp_tool,
+    text_round,
+    tool_round,
+)
+from tests.test_market_api import FakeCatalogHttp, FakeCatalogResponse
 from tests.test_server_stream import StubSettings
 
 
@@ -25,7 +33,7 @@ def good_entry(**overrides):
     return entry
 
 
-class McpApiTest(unittest.TestCase):
+class McpApiHarness(unittest.TestCase):
     def setUp(self):
         self._orig = (
             server.settings,
@@ -78,6 +86,7 @@ class McpApiTest(unittest.TestCase):
             self.root, mcp_config=self.config, mcp_client_factory=self.factory
         )
 
+class McpApiTest(McpApiHarness):
     def test_lists_servers_with_tools_and_status(self):
         self.write_config({"servers": [good_entry(env={"ACME_TOKEN": "${MCP_ACME_TOKEN}"})]})
         import os
@@ -171,6 +180,161 @@ class McpApiTest(unittest.TestCase):
         observation = next(f for f in observations if f.get("type") == "observation")
         self.assertFalse(observation["is_error"])  # 闸门放行（非「未激活/未注册」）
         self.assertEqual(observation["text"], "ok")
+
+
+class McpInstallTest(McpApiHarness):
+    """安装来源：目录条目合成连接定义、本地 server.json/mcp.json 导入、mcpb 拒绝。"""
+
+    def setUp(self):
+        super().setUp()
+        self.dotenv = Path(self._tmp.name) / ".env"
+        self._orig_dotenv = server._DOTENV_PATH
+        server._DOTENV_PATH = self.dotenv
+        self.catalog = FakeCatalogHttp()
+        self._orig_catalog = server._catalog_client
+        server._catalog_client = lambda: self.catalog  # 工厂注入（缝的形状是可调用）
+
+    def tearDown(self):
+        server._catalog_client = self._orig_catalog
+        server._DOTENV_PATH = self._orig_dotenv
+        super().tearDown()
+
+    def server_json(self, **overrides):
+        payload = json.loads(load_catalog_fixture("mcp-registry-detail.json"))
+        payload["server"].update(overrides)
+        return json.dumps(payload["server"], ensure_ascii=False)
+
+    def install_body(self, **overrides):
+        body = {
+            "source": "catalog",
+            "catalog_id": "io.github.acme/filesystem",
+            "source_platform": "mcp-registry",
+            "env_values": {"ACME_TOKEN": "s3cret"},
+        }
+        body.update(overrides)
+        return body
+
+    def test_install_from_catalog_composes_command_template(self):
+        self.catalog.routes.append(
+            (
+                "/internal/detail",
+                FakeCatalogResponse(
+                    {"manifest_path": "server.json", "manifest_text": self.server_json()}
+                ),
+            )
+        )
+        self.write_config({"servers": []})
+        self.wire()
+        resp = self.client.post("/mcp/install", json=self.install_body())
+        data = resp.json()
+        self.assertEqual(data["results"][0]["status"], "installed")
+
+        listing = self.client.get("/mcp").json()
+        item = listing["servers"][0]
+        self.assertEqual(item["command"], ["npx", "-y", "@acme/mcp-fs@1.2.3"])
+        self.assertEqual(item["transport"], "stdio")
+        self.assertEqual(item["source"], "catalog:mcp-registry")
+        self.assertEqual(item["status"], "connected")  # 装了即用
+        self.assertTrue(item["tools"])
+        # 密钥：值进 .env、条目留占位、响应脱敏
+        self.assertIn("ACME_TOKEN=s3cret", self.dotenv.read_text(encoding="utf-8"))
+        self.assertEqual(item["env_keys"], ["ACME_TOKEN"])
+        self.assertNotIn("s3cret", self.client.get("/mcp").text)
+        # 零意外外网：仅取详情一次
+        self.assertEqual(
+            [(method, path) for method, path, _k in self.catalog.calls],
+            [("GET", "/internal/detail")],
+        )
+        # 同名再装 → skipped
+        resp = self.client.post("/mcp/install", json=self.install_body())
+        self.assertEqual(resp.json()["results"][0]["status"], "skipped")
+
+    def test_install_mcpb_only_rejected_with_warning(self):
+        self.catalog.routes.append(
+            (
+                "/internal/detail",
+                FakeCatalogResponse(
+                    {
+                        "manifest_path": "server.json",
+                        "manifest_text": self.server_json(
+                            packages=[
+                                {
+                                    "registryType": "mcpb",
+                                    "identifier": "https://github.com/x/y/releases/a.mcpb",
+                                    "version": "1.0.0",
+                                    "fileSha256": "ab",
+                                }
+                            ],
+                            remotes=[],
+                        ),
+                    }
+                ),
+            )
+        )
+        self.write_config({"servers": []})
+        self.wire()
+        data = self.client.post("/mcp/install", json=self.install_body()).json()
+        self.assertEqual(data["results"][0]["status"], "invalid")
+        self.assertIn("mcpb", data["results"][0]["detail"])
+        self.assertEqual(self.client.get("/mcp").json()["servers"], [])
+
+    def test_local_import_mcp_json(self):
+        file_path = Path(self._tmp.name) / "mcp.json"
+        file_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "a/local": {
+                            "command": sys.executable,
+                            "args": ["-m", "x"],
+                            "env": {"K": "${V}"},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.write_config({"servers": []})
+        self.wire()
+        data = self.client.post(
+            "/mcp/install", json={"source": "local", "path": str(file_path)}
+        ).json()
+        self.assertEqual(data["results"][0]["status"], "installed")
+        item = self.client.get("/mcp").json()["servers"][0]
+        self.assertEqual(item["command"], [sys.executable, "-m", "x"])
+        self.assertEqual(item["source"], f"import:{file_path}")
+
+    def test_local_import_server_json_remote(self):
+        file_path = Path(self._tmp.name) / "server.json"
+        file_path.write_text(
+            self.server_json(
+                name="io.github.acme/remote-db",
+                packages=[],
+                remotes=[
+                    {
+                        "type": "streamable-http",
+                        "url": "https://mcp.acme.dev/db/mcp",
+                        "headers": [
+                            {
+                                "name": "Authorization",
+                                "isRequired": True,
+                                "isSecret": True,
+                            }
+                        ],
+                    }
+                ],
+            ),
+            encoding="utf-8",
+        )
+        self.write_config({"servers": []})
+        self.wire()
+        data = self.client.post(
+            "/mcp/install", json={"source": "local", "path": str(file_path)}
+        ).json()
+        self.assertEqual(data["results"][0]["status"], "installed")
+        item = self.client.get("/mcp").json()["servers"][0]
+        self.assertEqual(item["transport"], "streamable-http")
+        self.assertEqual(item["header_keys"], ["Authorization"])
 
 
 if __name__ == "__main__":

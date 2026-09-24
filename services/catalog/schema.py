@@ -119,6 +119,8 @@ class CatalogEntry:
     audits: tuple[AuditBadge, ...] = field(default_factory=tuple)
     validated: bool = False
     is_duplicate: bool = False
+    status: str = "active"  # active | deprecated（deleted 由适配器剔除不上架）
+    status_message: str = ""  # deprecated 原因等
 
     def to_dict(self) -> dict:
         return {
@@ -136,6 +138,8 @@ class CatalogEntry:
             "audits": [badge.to_dict() for badge in self.audits],
             "validated": self.validated,
             "is_duplicate": self.is_duplicate,
+            "status": self.status,
+            "status_message": self.status_message,
         }
 
     @classmethod
@@ -164,6 +168,8 @@ class CatalogEntry:
             ),
             validated=bool(raw.get("validated")),
             is_duplicate=bool(raw.get("is_duplicate")),
+            status=clean_text(raw.get("status"), 16).lower() or "active",
+            status_message=clean_text(raw.get("status_message"), 200),
         )
 
 

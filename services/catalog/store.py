@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS entries (
   install_ref TEXT NOT NULL DEFAULT '',
   audits TEXT NOT NULL DEFAULT '[]',
   validated INTEGER NOT NULL DEFAULT 0,
-  is_duplicate INTEGER NOT NULL DEFAULT 0
+  is_duplicate INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  status_message TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS source_state (
   source TEXT PRIMARY KEY,
@@ -131,12 +133,15 @@ class SqliteStore:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
-        try:  # 旧库（无 kind 列）迁移：kind 默认 skill
-            self._conn.execute(
-                "ALTER TABLE entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill'"
-            )
-        except sqlite3.OperationalError:
-            pass
+        for column_sql in (
+            "ALTER TABLE entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill'",
+            "ALTER TABLE entries ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE entries ADD COLUMN status_message TEXT NOT NULL DEFAULT ''",
+        ):
+            try:  # 旧库迁移：缺列补齐
+                self._conn.execute(column_sql)
+            except sqlite3.OperationalError:
+                pass
         self._conn.commit()
 
     def close(self) -> None:
@@ -150,7 +155,7 @@ class SqliteStore:
             self._conn.executemany(
                 "INSERT INTO entries (source, id, name, description, origin, kind,"
                 " installs, stars, tags, detail_url, install_ref, audits, validated,"
-                " is_duplicate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " is_duplicate, status, status_message) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [self._row(source, entry) for entry in entries],
             )
             self._conn.execute(
@@ -188,7 +193,8 @@ class SqliteStore:
             ).fetchone()[0]
             rows = self._conn.execute(
                 f"SELECT source, id, name, description, origin, kind, installs, stars,"
-                f" tags, detail_url, install_ref, audits, validated, is_duplicate"
+                f" tags, detail_url, install_ref, audits, validated, is_duplicate,"
+                f" status, status_message"
                 f" FROM entries{clause} ORDER BY rowid LIMIT ? OFFSET ?",
                 [*params, page_size, (page - 1) * page_size],
             ).fetchall()
@@ -240,6 +246,8 @@ class SqliteStore:
             json.dumps([badge.to_dict() for badge in entry.audits], ensure_ascii=False),
             1 if entry.validated else 0,
             1 if entry.is_duplicate else 0,
+            entry.status,
+            entry.status_message,
         )
 
     @staticmethod
@@ -259,6 +267,8 @@ class SqliteStore:
             audits,
             validated,
             is_duplicate,
+            status,
+            status_message,
         ) = row
         return CatalogEntry(
             id=entry_id,
@@ -275,6 +285,8 @@ class SqliteStore:
             audits=tuple(AuditBadge.from_raw(item) for item in json.loads(audits)),
             validated=bool(validated),
             is_duplicate=bool(is_duplicate),
+            status=status,
+            status_message=status_message,
         )
 
 

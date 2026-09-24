@@ -18,6 +18,7 @@
     GET  /mcp             MCP 连接定义列表（状态 + 工具 + 加载错误）
     POST /mcp/enable|disable|remove  启用/禁用/删除 MCP 服务 {"name": "..."}
     POST /mcp/reload      重读连接定义并整体重连
+    POST /mcp/install     安装 {"source": "catalog"|"local", "catalog_id"/"path": "...", "env_values": {...}}
     GET  /skills/presets  预设平台源清单（一键安装用）
     GET  /skills/{name}   技能详情（含 SKILL.md 原文）
     POST /skills/{name}/enable     启用技能
@@ -67,8 +68,10 @@ from .mcp import (
     McpError,
     McpManager,
     load_servers,
+    parse_install_text,
     resolve_config_path,
     sdk_client_factory,
+    write_dotenv,
 )
 from .observation import (
     READ_TOOL_NAME,
@@ -151,6 +154,9 @@ atexit.register(mcp_manager.close)
 _chat_lock = threading.Lock()
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# 安装时密钥值的落点（测试注入点：替换为临时文件即可断言写入内容）
+_DOTENV_PATH = PROJECT_ROOT / ".env"
 
 app = FastAPI(
     title="multiagent",
@@ -571,6 +577,63 @@ def reload_mcp() -> dict:
             "servers": mcp_manager.listing(),
             "load_errors": errors,
         }
+
+
+class McpInstallRequest(BaseModel):
+    source: str  # catalog | local
+    catalog_id: str = ""
+    source_platform: str = ""
+    path: str = ""
+    env_values: dict[str, str] = Field(default_factory=dict)
+
+
+@app.post("/mcp/install")
+def install_mcp(req: McpInstallRequest) -> dict:
+    """安装来源：目录条目合成连接定义 / 本地 server.json、mcp.json 导入。
+
+    密钥值写入 .env（连接定义只留 ${VAR} 占位）；mcpb 单文件包标「暂不支持」。
+    """
+    with _chat_lock:
+        source = (req.source or "").strip().lower()
+        if source == "catalog":
+            if not req.catalog_id or not req.source_platform:
+                raise HTTPException(
+                    status_code=400, detail="catalog 安装需要 catalog_id 与 source_platform"
+                )
+            payload = _market_proxy(
+                "GET",
+                "/internal/detail",
+                params={"id": req.catalog_id, "source": req.source_platform},
+            )
+            text = str(payload.get("manifest_text") or "")
+            label = f"catalog:{req.source_platform}"
+        elif source == "local":
+            if not req.path:
+                raise HTTPException(status_code=400, detail="local 导入需要 path")
+            file_path = Path(req.path)
+            try:
+                text = file_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"文件读取失败: {exc}") from exc
+            label = f"import:{file_path}"
+        else:
+            raise HTTPException(status_code=400, detail="source 必为 catalog 或 local")
+        try:
+            candidates, warnings = parse_install_text(text, source=label)
+        except McpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if req.env_values:
+            write_dotenv(_DOTENV_PATH, req.env_values)
+        results = []
+        for name, server_def, error in candidates:
+            if server_def is None:
+                results.append({"name": name, "status": "invalid", "detail": error})
+                continue
+            status, detail = mcp_manager.install(
+                server_def, environ_update=req.env_values
+            )
+            results.append({"name": name, "status": status, "detail": detail})
+        return {"source": label, "results": results, "warnings": warnings}
 
 
 # ---- 技能管理面 ----

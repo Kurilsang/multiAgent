@@ -88,6 +88,17 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(total, 1)
         self.assertEqual(items[0].kind, "skill")
 
+    def test_status_roundtrips_in_cache(self):
+        from services.catalog.schema import CatalogEntry
+
+        entry = CatalogEntry(
+            id="a/b", name="n", description="d", source="a", origin="o",
+            status="deprecated", status_message="改用别的",
+        )
+        self.store.replace_source("a", [entry], "t1")
+        loaded = self.store.search()[0][0]
+        self.assertEqual((loaded.status, loaded.status_message), ("deprecated", "改用别的"))
+
     def test_record_error_keeps_cache_and_marks_stale(self):
         self.store.replace_source("fake", make_catalog_entries(5), "t1")
         self.store.record_error("fake", "平台不可达")

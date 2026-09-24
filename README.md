@@ -203,7 +203,7 @@ python -m unittest discover tests -v
 
 - 单会话内存上下文：服务重启后历史与任务轨迹清空；接口内部已加锁串行化，适合单用户/低并发使用
 - Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
-- MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；mcpb 单文件包条目暂不支持安装（见 #35）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令
+- MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；mcpb 单文件包条目暂不支持安装（后续扩展点）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
 - SSE 断连后任务不恢复，页面重开需重新发起
@@ -211,7 +211,7 @@ python -m unittest discover tests -v
 ## 后续规划
 
 - 多 Agent 协作（评审者/执行者分工，复用状态机引擎）
-- MCP 市场后续票：官方 Registry 目录适配器与浏览点装、远程 streamable-http 接入、WebUI 统一市场与单次确认卡（#35-#39）
+- MCP 市场剩余票：WebUI 统一市场与 MCP 单次确认卡、最终文档收口（#38/#39）；后续扩展：mcpb 单文件包下载安装、ClawHub 适配器
 - 技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub API）、zip 上传、版本与更新检查
 - 多会话管理与持久化
 - 网关特化逻辑（路由、鉴权、审计）

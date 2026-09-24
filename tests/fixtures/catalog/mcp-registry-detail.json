@@ -1,0 +1,38 @@
+{
+  "server": {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "io.github.acme/filesystem",
+    "description": "文件系统读写工具",
+    "title": "Acme 文件系统",
+    "version": "1.2.3",
+    "repository": {"url": "https://github.com/acme/mcp-fs", "source": "github"},
+    "websiteUrl": "https://acme.dev/fs",
+    "packages": [
+      {
+        "registryType": "npm",
+        "identifier": "@acme/mcp-fs",
+        "version": "1.2.3",
+        "runtimeHint": "npx",
+        "runtimeArguments": [{"value": "-y", "type": "positional"}],
+        "packageArguments": [],
+        "environmentVariables": [
+          {
+            "name": "ACME_TOKEN",
+            "description": "访问密钥",
+            "isRequired": true,
+            "isSecret": true
+          }
+        ],
+        "transport": {"type": "stdio"}
+      }
+    ],
+    "remotes": []
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "isLatest": true,
+      "publishedAt": "2026-09-01T00:00:00Z"
+    }
+  }
+}

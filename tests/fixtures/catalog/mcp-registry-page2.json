@@ -1,0 +1,32 @@
+{
+  "servers": [
+    {
+      "server": {
+        "name": "io.github.acme/remote-db",
+        "description": "远程数据库查询",
+        "version": "2.0.0",
+        "remotes": [
+          {
+            "type": "streamable-http",
+            "url": "https://mcp.acme.dev/db/mcp",
+            "headers": [
+              {
+                "name": "Authorization",
+                "description": "Bearer 密钥",
+                "isRequired": true,
+                "isSecret": true
+              }
+            ]
+          }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "isLatest": true
+        }
+      }
+    }
+  ],
+  "metadata": {"count": 1, "nextCursor": ""}
+}

@@ -125,11 +125,24 @@ MCP 生态已有大量现成的工具服务器（GitHub、文件系统、数据�
 - 第三方安全审计链路（AuditBadge 对 MCP 恒为 unknown）
 - 「动态清单 + 元工具按需解锁」的工具暴露模式（留作工具爆炸退路）
 - 第二家在线源适配器（Smithery / ClawHub / mcp.so）
-- MCP 协议的 prompts / resources / sampling / elicitation；动态 OAuth 授权流（仅静态 env/header 密钥）
+- MCP 协议的 prompts / resources / sampling / elicitation
 - `/` 弹层与 `/技能名` 路由纳入 MCP
 - 多会话持久化（重启清空现状不变，旁存句柄池同样不持久）
 - stdio 沙箱（不做；风险经确认卡与文档披露）
 - CLI 侧改动（CLI 工具调用随注册表自然生效，无 CLI 专属功能）
+
+（原非目标「动态 OAuth 授权流（仅静态 env/header 密钥）」已由 issue #44 落地，见下方增补。）
+
+## 增补：动态 OAuth 授权流（issue #44，已落地）
+
+原「仅静态 env/header 密钥」边界扩为：静态 `${VAR}` 密钥路径不变（仍优先推荐长期 PAT），另支持 `auth: "oauth"` 动态授权流。
+
+- **连接定义**：新增 `auth`（`none` | `oauth`，仅 streamable-http）与 `auth_flow`（`auto` | `authorization_code` | `device_code`；auto = 交互终端取授权码、无 TTY 取设备码）。目录/本地安装的远程认证声明（`authentication: {"type": ...}` 或字符串）映射到该字段；确认卡能力声明增 auth 展示。
+- **授权码 + PKCE**：接官方 mcp SDK `OAuthClientProvider`（授权码 + PKCE + 过期自动刷新），交互回调走终端贴码（浏览器跳转后的完整 URL 含 code/state 整段粘贴）；连接期就绪等待放宽到 `OAUTH_CONNECT_TIMEOUT`（600s，含浏览器交互）。
+- **设备码（RFC 8628）**：无头/网关路径。元数据发现（`/.well-known/oauth-authorization-server`）→ 动态客户端注册（RFC 7591，client_id 落 token 文件复用）→ 终端展示 user_code/验证地址 → 轮询换 token（authorization_pending/slow_down/过期/拒绝语义对位 RFC）。
+- **token 存储**：独立 token 文件（`MCP_TOKEN_FILE`，默认 `mcp/tokens.json`），按服务名分槽、写入原子替换 + 权限 0600；不进版本库（.gitignore）、不进 `.env` 明文。刷新失败降级为连接错误并提示重授权（`explain_error` 叶子穿透前置「请重新授权」）。
+- **管理面**：`GET /mcp` 每条增 `auth` 与 `auth_status`（`none` / `authorized` / `expired` / `unauthorized`，expired = 过期且无 refresh_token）；`POST /mcp/reauth` 清 token 并重连触发重授权；WebUI 卡片增授权状态徽章与「重新授权」按钮。
+- **测试缝（issue #44 新增）**：授权协作对象注入（`McpManager(oauth=...)`，fake 脚本化）+ OAuth HTTP 缝（发现/注册/换 token 全走注入）+ 假时钟/睡眠；测试零真实授权请求（tests/test_mcp_auth.py）。
 
 ## 备注（Further Notes）
 

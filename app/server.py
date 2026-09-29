@@ -15,9 +15,10 @@
                           显式点名技能，确定性升级为任务通道（预激活）
     POST /agent/stream    发起自主任务 {"task": "...", ...}，思考/动作/观察 SSE 事件流
     GET  /skills          已装技能列表（元数据 + 启停状态 + 启动加载错误）
-    GET  /mcp             MCP 连接定义列表（状态 + 工具 + 加载错误）
+    GET  /mcp             MCP 连接定义列表（状态 + 工具 + 授权状态 + 加载错误）
     POST /mcp/enable|disable|remove  启用/禁用/删除 MCP 服务 {"name": "..."}
     POST /mcp/reload      重读连接定义并整体重连
+    POST /mcp/reauth      OAuth 服务重新授权（清 token 并重连）{"name": "..."}
     POST /mcp/install     安装 {"source": "catalog"|"local", "catalog_id"/"path": "...", "env_values": {...}}
     GET  /skills/presets  预设平台源清单（一键安装用）
     GET  /skills/{name}   技能详情（含 SKILL.md 原文）
@@ -74,6 +75,7 @@ from .mcp import (
     sdk_client_factory,
     write_dotenv,
 )
+from .mcp_auth import default_oauth
 from .observation import (
     READ_TOOL_NAME,
     ResultPool,
@@ -104,12 +106,15 @@ def _build_wiring(
     skills_dir: Path,
     mcp_config: Path | None = None,
     mcp_client_factory=None,
+    mcp_oauth=None,
 ):
     """构建工具/技能/MCP 注册表与 Agent 引擎（测试可换技能目录重建整套）。
 
     技能元工具先注册（create_skill 的校验基准含元工具），随后 MCP 连接建连、
     工具以 mcp__* 灌入注册表（技能包可声明其为依赖），最后热加载技能包。
     mcp_config 缺省为 None = 不加载任何 MCP 条目（测试保持封闭）。
+    mcp_oauth 为 OAuth 授权协作对象（issue #44）；缺省用默认实现（token 文件见
+    MCP_TOKEN_FILE），测试注入假实现保证零真实授权。
     """
     tools = default_registry()
     skills = SkillRegistry(skills_dir, tools=tools)
@@ -126,6 +131,7 @@ def _build_wiring(
         max_tools=settings.mcp_max_tools,
         config_path=mcp_config,
         registry=tools,
+        oauth=mcp_oauth if mcp_oauth is not None else default_oauth(),
     )
     mcp.load_errors.extend(mcp_parse_errors)
     mcp.connect(reserved=tools.names())
@@ -578,6 +584,18 @@ def reload_mcp() -> dict:
             "servers": mcp_manager.listing(),
             "load_errors": errors,
         }
+
+
+@app.post("/mcp/reauth")
+def reauth_mcp(req: McpActionRequest) -> dict:
+    """OAuth 重授权：清 token 并重连该服务（issue #44 管理面重授权入口）。"""
+    with _chat_lock:
+        try:
+            item = mcp_manager.reauthorize(req.name)
+        except McpError as exc:
+            code = 404 if str(exc).startswith("未找到") else 400
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
+        return {"status": "ok", "server": item}
 
 
 class McpInstallRequest(BaseModel):

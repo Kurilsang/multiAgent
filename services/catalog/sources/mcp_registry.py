@@ -198,6 +198,7 @@ def _install_preview(server: dict) -> dict:
             "transport": "stdio",
             "command": argv,
             "runtime_hint": hint,
+            "auth": "none",
             "env": _declarations(package.get("environmentVariables"), header=False),
         }
     remotes = [item for item in server.get("remotes") or [] if isinstance(item, dict)]
@@ -205,16 +206,47 @@ def _install_preview(server: dict) -> dict:
         (item for item in remotes if item.get("type") == "streamable-http"), None
     )
     if remote is not None:
-        return {
+        auth, auth_flow = _auth_declaration(remote)
+        preview = {
             "transport": "streamable-http",
             "url": str(remote.get("url") or ""),
+            "auth": auth,
             "headers": _declarations(remote.get("headers"), header=True),
         }
+        if auth_flow != "auto":
+            preview["auth_flow"] = auth_flow
+        return preview
     if packages:
         return {"transport": None, "reason": "mcpb 单文件包暂不支持安装"}
     if remotes:
         return {"transport": None, "reason": "仅 sse 远程（协议已废弃），暂不支持"}
     return {"transport": None, "reason": "条目无可安装形态（无 packages/remotes）"}
+
+
+def _auth_declaration(remote: dict) -> tuple[str, str]:
+    """远程认证声明 → (auth, auth_flow)（对位 app/mcp.py._auth_from_declaration）。
+
+    兼容 `authentication` 对象（{"type": ...}）与字符串形态；oauth 族声明映射到
+    auth=oauth（可带显式流程），其余（bearer/api_key 等）按静态密钥处理。
+    """
+    raw = remote.get("authentication")
+    if raw is None:
+        raw = remote.get("auth")
+    if raw is None:
+        return "none", "auto"
+    if isinstance(raw, dict):
+        value = str(raw.get("type") or raw.get("scheme") or "")
+    else:
+        value = str(raw)
+    value = value.strip().lower()
+    if value in ("oauth", "authorization_code", "device_code", "authorization_code_pkce", "pkce"):
+        flow = "auto"
+        if value in ("authorization_code", "authorization_code_pkce", "pkce"):
+            flow = "authorization_code"
+        elif value == "device_code":
+            flow = "device_code"
+        return "oauth", flow
+    return "none", "auto"
 
 
 def _declarations(decls, *, header: bool) -> list[dict]:

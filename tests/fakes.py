@@ -127,6 +127,61 @@ def make_mcp_tool(name="read_file", description="读文件", parameters=None):
     }
 
 
+# ---- MCP OAuth（app/mcp_auth）测试替身：授权协作对象 / HTTP 注入缝 ----
+
+
+class FakeMcpOAuth:
+    """假授权协作对象：状态脚本化、记录 ensure/clear 调用；不发真实授权请求。"""
+
+    def __init__(self, status="authorized", error=None, statuses=None):
+        self.status_value = status
+        self.error = error
+        self.statuses = dict(statuses or {})
+        self.ensure_calls: list[str] = []
+        self.clear_calls: list[str] = []
+
+    def status(self, server):
+        return self.statuses.get(server.name, self.status_value)
+
+    def ensure_authorized(self, server):
+        self.ensure_calls.append(server.name)
+        if self.error is not None:
+            raise self.error
+
+    def clear(self, server):
+        self.clear_calls.append(server.name)
+        self.statuses[server.name] = "unauthorized"
+
+
+class FakeOAuthHttp:
+    """脚本化 OAuth HTTP 缝：按序弹出 (status, body)；记录每次请求供断言。
+
+    脚本条目若为 Exception 实例则直接抛出；脚本耗尽再被调用即失败，
+    用于守住「计划外的外网请求」。"""
+
+    def __init__(self, script=()):
+        self.script = list(script)
+        self.requests: list[tuple[str, str, dict]] = []
+
+    def _next(self, method, url, data):
+        self.requests.append((method, url, dict(data or {})))
+        if not self.script:
+            raise AssertionError("脚本耗尽：OAuth 发起了计划外的请求")
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def get_json(self, url):
+        return self._next("GET", url, None)
+
+    def post_json(self, url, data):
+        return self._next("POST", url, data)
+
+    def post_form(self, url, data):
+        return self._next("POST", url, data)
+
+
 # ---- 技能在线目录（services/catalog）测试替身 ----
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "catalog"

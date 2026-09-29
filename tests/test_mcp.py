@@ -110,6 +110,54 @@ class ParseServersTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("JSON", errors[0])
 
+    def test_parses_auth_fields(self):
+        servers, errors = load_servers(
+            text="""{"servers": [{"name": "acme/remote", "transport": "streamable-http",
+              "url": "https://mcp.acme.dev/mcp", "auth": "oauth", "auth_flow": "device_code"}]}"""
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(servers[0].auth, "oauth")
+        self.assertEqual(servers[0].auth_flow, "device_code")
+
+    def test_auth_declarations_validated(self):
+        # oauth 仅 streamable-http（stdio 本地进程无 OAuth 授权流）
+        _, errors = load_servers(
+            text='{"servers": [{"name": "a/b", "transport": "stdio", "command": ["x"], "auth": "oauth"}]}'
+        )
+        self.assertIn("streamable-http", errors[0])
+        # 未知 auth 值
+        _, errors = load_servers(
+            text='{"servers": [{"name": "a/b", "transport": "streamable-http", "url": "u", "auth": "magic"}]}'
+        )
+        self.assertIn("auth", errors[0])
+        # auth_flow 仅在 auth=oauth 时有意义
+        _, errors = load_servers(
+            text='{"servers": [{"name": "a/b", "transport": "streamable-http", "url": "u", "auth_flow": "device_code"}]}'
+        )
+        self.assertIn("auth_flow", errors[0])
+
+    def test_save_round_trips_auth_fields(self):
+        from app.mcp import save_servers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "servers.json"
+            save_servers(
+                path,
+                [
+                    McpServer(
+                        name="acme/remote",
+                        transport="streamable-http",
+                        url="https://mcp.acme.dev/mcp",
+                        auth="oauth",
+                        auth_flow="device_code",
+                    )
+                ],
+            )
+            servers, errors = load_servers(path=path)
+        self.assertEqual(errors, [])
+        self.assertEqual(servers[0].auth, "oauth")
+        self.assertEqual(servers[0].auth_flow, "device_code")
+
 
 class PlaceholderTest(unittest.TestCase):
     """${VAR} 占位符：值来自 .env/环境变量；未解析即报错并禁用该服务。"""

@@ -82,8 +82,20 @@ _Avoid_: 安装包、压缩包
 _Avoid_: 插件、远程工具
 
 **连接定义(Connection Entry)**:
-一条 MCP 服务的声明式配置(名称/transport/命令 argv 或 endpoint/${VAR} 环境变量与请求头占位/启用位/工具白名单),存于 MCP_CONFIG 文件;文件态是唯一事实源,密钥只以占位符引用 .env。
+一条 MCP 服务的声明式配置(名称/transport/命令 argv 或 endpoint/${VAR} 环境变量与请求头占位/启用位/工具白名单/认证声明 auth、auth_flow),存于 MCP_CONFIG 文件;文件态是唯一事实源,密钥只以占位符引用 .env。
 _Avoid_: 配置项、安装包
+
+**动态授权流(OAuth Flow)**:
+`auth: oauth` 连接定义的动态授权方式:授权码 + PKCE(浏览器授权、终端贴码)或设备码(RFC 8628,无头/网关路径),token 过期自动刷新;刷新失败降级为连接错误并提示重新授权。
+_Avoid_: 单点登录、SSO、密钥
+
+**token 文件(Token File)**:
+OAuth 授权产物的独立存储(`MCP_TOKEN_FILE`,默认 mcp/tokens.json),按服务名分槽、权限收紧;不进版本库、不进 .env 明文。
+_Avoid_: 密钥文件、凭据库、.env
+
+**授权状态(Authorization Status)**:
+管理面对 OAuth 服务的三态标注:已授权(authorized)/过期(expired,过期且无 refresh_token,需人工重授权)/未授权(unauthorized);重授权 = 清 token 并重连触发授权流。
+_Avoid_: 登录状态
 
 **观察值视图(Observation View)**:
 工具结果进入上下文的截断窗口(默认 4000 字符,全局/工具级可配,0=全量直灌);尾注标注全文大小与续读指引。

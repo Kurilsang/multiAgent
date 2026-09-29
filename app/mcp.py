@@ -2,7 +2,8 @@
 
 连接定义是单一声明式文件（默认 mcp/servers.json）里的条目：名称 +
 transport + 命令 argv / endpoint + `${VAR}` 环境变量占位 + 启用位/来源/
-观察值视图大小/工具白名单。文件态是唯一事实源（对位技能包约定，SPEC-0003）。
+观察值视图大小/工具白名单 + 认证声明（`auth: oauth` 走动态授权流，
+支撑层见 app/mcp_auth.py）。文件态是唯一事实源（对位技能包约定，SPEC-0003）。
 
 运行时侧（McpManager，client factory 注入缝）见本模块后半部分：
 启用服务暴露的工具以 `mcp__<服务短名>__<工具名>` 灌入工具注册表，引擎零改动。
@@ -20,15 +21,25 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型标注
+    from .mcp_auth import McpOAuth
 
 TRANSPORTS = ("stdio", "streamable-http")
+AUTH_MODES = ("none", "oauth")
+AUTH_FLOWS = ("auto", "authorization_code", "device_code")
 MAX_NAME_CHARS = 200
 FUNCTION_NAME_MAX = 64
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+# 官方 mcp SDK 授权流异常（mcp.client.auth.exceptions）：链上出现即前置重授权提示
+_OAUTH_ERROR_NAMES = frozenset(
+    {"OAuthFlowError", "OAuthTokenError", "OAuthRegistrationError"}
+)
 
 
 class McpError(Exception):
@@ -49,6 +60,8 @@ class McpServer:
     url: str = ""  # streamable-http：endpoint（支持 ${VAR} 模板变量）
     env: Mapping[str, str] = field(default_factory=dict)  # ${VAR} 占位原文
     headers: Mapping[str, str] = field(default_factory=dict)  # 远程请求头（密钥占位）
+    auth: str = "none"  # none | oauth（oauth 仅 streamable-http；见 app/mcp_auth.py）
+    auth_flow: str = "auto"  # auto | authorization_code | device_code（仅 auth=oauth 有意义）
     enabled: bool = True
     source: str = "local"  # local | catalog:<平台> | import:<path>
     max_observation_chars: int | None = None  # 观察值视图大小覆盖；None=全局默认
@@ -123,6 +136,12 @@ def _parse_entry(raw) -> McpServer:
         raise McpError("headers 须为 {请求头名: 值} 对象（值可用 ${VAR} 占位）")
     headers = {str(key): str(value) for key, value in headers_raw.items()}
 
+    auth, auth_flow = validate_auth(
+        _clean_str(raw.get("auth"), 32) or "none",
+        _clean_str(raw.get("auth_flow"), 32) or "auto",
+        transport,
+    )
+
     max_observation_chars = raw.get("max_observation_chars")
     if max_observation_chars is not None:
         try:
@@ -145,11 +164,30 @@ def _parse_entry(raw) -> McpServer:
         url=url,
         env=env,
         headers=headers,
+        auth=auth,
+        auth_flow=auth_flow,
         enabled=bool(raw.get("enabled", True)),
         source=_clean_str(raw.get("source"), 64) or "local",
         max_observation_chars=max_observation_chars,
         enabled_tools=tuple(item.strip() for item in tools_raw),
     )
+
+
+def validate_auth(auth: str, auth_flow: str, transport: str) -> tuple[str, str]:
+    """认证声明校验（连接定义与安装路径共用）：返回规范化 (auth, auth_flow)。
+
+    oauth 仅对 streamable-http 有意义（stdio 本地进程没有授权服务器）；
+    auth_flow 只在 auth=oauth 下可指定（默认 auto = 交互终端取授权码、无 TTY 取设备码）。
+    """
+    if auth not in AUTH_MODES:
+        raise McpError(f"auth 必为 {' | '.join(AUTH_MODES)} 之一，收到 {auth!r}")
+    if auth_flow not in AUTH_FLOWS:
+        raise McpError(f"auth_flow 必为 {' | '.join(AUTH_FLOWS)} 之一，收到 {auth_flow!r}")
+    if auth == "oauth" and transport != "streamable-http":
+        raise McpError("auth=oauth 仅支持 streamable-http 远程服务（stdio 本地进程无 OAuth 授权流）")
+    if auth != "oauth" and auth_flow != "auto":
+        raise McpError("auth_flow 仅在 auth=oauth 时有意义")
+    return auth, auth_flow
 
 
 def resolve_placeholders(
@@ -244,14 +282,19 @@ def explain_error(exc: BaseException) -> str:
     str() 只剩「unhandled errors in a TaskGroup」套话——错误信息从用户视角写：
     异常组自身文本一律跳过，只取叶子原因（如 Authentication required / 连接被拒绝）；
     非组异常保留自身文本，只追显式 raise ... from ... 链（隐式 __context__ 多为背景噪音）。
+    链上出现 OAuth 授权异常时前置一句重授权提示（对位 issue #44 刷新失败降级语义）。
     """
     leaves: list[str] = []
     seen: set[int] = set()
+    saw_oauth = False
 
     def walk(node: BaseException | None) -> None:
+        nonlocal saw_oauth
         if node is None or id(node) in seen:
             return
         seen.add(id(node))
+        if type(node).__name__ in _OAUTH_ERROR_NAMES:
+            saw_oauth = True
         nested = getattr(node, "exceptions", None)
         if nested:  # 异常组自身文本是套话，只取子异常
             for sub in nested:
@@ -263,7 +306,10 @@ def explain_error(exc: BaseException) -> str:
         walk(node.__cause__)
 
     walk(exc)
-    return "；".join(leaves[:3]) or type(exc).__name__
+    text = "；".join(leaves[:3]) or type(exc).__name__
+    if saw_oauth:
+        text = f"OAuth 授权失败或 token 已过期，请重新授权（{text}）"
+    return text
 
 
 def runner_problem(server: McpServer) -> str | None:
@@ -317,6 +363,7 @@ class McpManager:
         max_tools: int = 0,
         config_path: Path | None = None,
         registry=None,
+        oauth: "McpOAuth | None" = None,
     ):
         self._servers = list(servers)
         self._factory = client_factory
@@ -324,6 +371,7 @@ class McpManager:
         self._max_tools = max_tools
         self._config_path = Path(config_path) if config_path is not None else None
         self._registry = registry
+        self._oauth = oauth
         self._sessions: dict[str, McpSession] = {}
         self._entries: dict[str, _ToolEntry] = {}
         self._statuses: dict[str, tuple[str, str]] = {}
@@ -369,6 +417,13 @@ class McpManager:
                 f"未解析的占位符：{'、'.join('${' + var + '}' for var in missing)}"
                 f"——请在 .env 或环境变量中配置"
             )
+        if server.auth == "oauth":  # 动态 OAuth 授权流（issue #44）：先授权后建连
+            if self._oauth is None:
+                raise McpError(
+                    "OAuth 授权流未配置：该服务声明 auth=oauth 但装配未注入授权协作对象"
+                    "——请改用长期 PAT 静态 token，或检查入口装配"
+                )
+            self._oauth.ensure_authorized(server)
         try:
             session = self._factory(
                 replace(
@@ -517,6 +572,8 @@ class McpManager:
                     "enabled": server.enabled,
                     "env_keys": sorted(server.env),
                     "header_keys": sorted(server.headers),
+                    "auth": server.auth,
+                    "auth_status": self._auth_status(server),
                     "tools": sorted(
                         full for full, entry in self._entries.items()
                         if entry.server.name == server.name
@@ -526,6 +583,14 @@ class McpManager:
                 }
             )
         return items
+
+    def _auth_status(self, server: McpServer) -> str:
+        """授权状态：none | authorized | expired | unauthorized（issue #44 管理面暴露）。"""
+        if server.auth != "oauth":
+            return "none"
+        if self._oauth is None:
+            return "unauthorized"
+        return self._oauth.status(server)
 
     def close(self) -> None:
         for session in self._sessions.values():
@@ -556,6 +621,25 @@ class McpManager:
             except McpError as exc:
                 self._reject(name, str(exc), errors)
                 self.load_errors.extend(errors)
+        return self.listing_item(name)
+
+    def reauthorize(self, name: str) -> dict:
+        """清除已存 token 并重连该服务（触发重新授权；issue #44 管理面重授权入口）。"""
+        server = self._find(name)
+        if server is None:
+            raise McpError(f"未找到 MCP 服务: {name!r}")
+        if server.auth != "oauth":
+            raise McpError(f"服务 {name!r} 未声明 auth=oauth，无需重新授权")
+        if self._oauth is None:
+            raise McpError("OAuth 授权流未配置，无法重新授权")
+        self._oauth.clear(server)
+        self._drop_server(name, status=("disabled", ""))
+        errors: list[str] = []
+        try:
+            self._connect_one(server, {}, {}, self._reserved())
+        except McpError as exc:
+            self._reject(name, str(exc), errors)
+            self.load_errors.extend(errors)
         return self.listing_item(name)
 
     def remove(self, name: str) -> None:
@@ -669,6 +753,10 @@ def save_servers(path: Path | None, servers: list[McpServer]) -> None:
             entry["env"] = dict(server.env)
         if server.headers:
             entry["headers"] = dict(server.headers)
+        if server.auth != "none":
+            entry["auth"] = server.auth
+        if server.auth_flow != "auto":
+            entry["auth_flow"] = server.auth_flow
         entry["enabled"] = server.enabled
         if server.source and server.source != "local":
             entry["source"] = server.source
@@ -776,6 +864,8 @@ def _entry_from_server_json(
         url = str(remote.get("url") or "").strip()
         if not url:
             return None, "远程条目缺 url", warnings
+        auth, auth_flow, auth_warnings = _auth_from_declaration(remote)
+        warnings.extend(auth_warnings)
         headers = {}
         for decl in remote.get("headers") or []:
             header = str(decl.get("name") or "")
@@ -788,6 +878,8 @@ def _entry_from_server_json(
                 transport="streamable-http",
                 url=url,
                 headers=headers,
+                auth=auth,
+                auth_flow=auth_flow,
                 source=source,
             ),
             "",
@@ -802,6 +894,36 @@ def _entry_from_server_json(
     if remotes:
         return None, "仅 sse 远程（协议已废弃），暂不支持", warnings
     return None, "条目无可安装形态（无 packages/remotes）", warnings
+
+
+def _auth_from_declaration(data: dict) -> tuple[str, str, list[str]]:
+    """远程认证声明 → (auth, auth_flow, 警告)。
+
+    兼容 `authentication` 对象（{"type": ...}）与字符串两种声明形态；
+    oauth 族声明映射到 auth=oauth（可带显式流程），其余（bearer/api_key 等）按静态密钥处理。
+    """
+    raw = data.get("authentication")
+    if raw is None:
+        raw = data.get("auth")
+    if raw is None:
+        return "none", "auto", []
+    if isinstance(raw, dict):
+        value = str(raw.get("type") or raw.get("scheme") or "")
+    else:
+        value = str(raw)
+    value = value.strip().lower()
+    if value in ("", "none"):
+        return "none", "auto", []
+    if value in ("oauth", "authorization_code", "device_code", "authorization_code_pkce", "pkce"):
+        flow = "auto"
+        if value in ("authorization_code", "authorization_code_pkce", "pkce"):
+            flow = "authorization_code"
+        elif value == "device_code":
+            flow = "device_code"
+        return "oauth", flow, []
+    if value in ("bearer", "api_key", "api-key", "basic", "header"):
+        return "none", "auto", []
+    return "none", "auto", [f"未识别的认证声明 {value!r} 已忽略（按静态密钥处理）"]
 
 
 def _command_from_package(package: dict, warnings: list[str]) -> list[str]:
@@ -849,6 +971,15 @@ def _entries_from_mcp_json(data: dict, *, source: str):
         env = {str(k): str(v) for k, v in (config.get("env") or {}).items()}
         headers = {str(k): str(v) for k, v in (config.get("headers") or {}).items()}
         url = str(config.get("url") or "")
+        try:
+            auth, auth_flow = validate_auth(
+                str(config.get("auth") or "none").strip().lower() or "none",
+                str(config.get("auth_flow") or "auto").strip().lower() or "auto",
+                "stdio" if argv else "streamable-http",
+            )
+        except McpError as exc:
+            candidates.append((str(name), None, str(exc)))
+            continue
         if argv:
             server = McpServer(
                 name=str(name),
@@ -856,6 +987,8 @@ def _entries_from_mcp_json(data: dict, *, source: str):
                 command=tuple(argv),
                 env=env,
                 headers=headers,
+                auth=auth,
+                auth_flow=auth_flow,
                 source=source,
             )
             candidates.append((str(name), server, ""))
@@ -866,6 +999,8 @@ def _entries_from_mcp_json(data: dict, *, source: str):
                 url=url,
                 env=env,
                 headers=headers,
+                auth=auth,
+                auth_flow=auth_flow,
                 source=source,
             )
             candidates.append((str(name), server, ""))
@@ -877,6 +1012,7 @@ def _entries_from_mcp_json(data: dict, *, source: str):
 # ---- 默认 client factory：官方 mcp SDK 会话（stdio） ----
 
 _CONNECT_TIMEOUT = 30.0
+OAUTH_CONNECT_TIMEOUT = 600.0  # 授权码流含浏览器交互，装配期就绪等待相应放宽
 _CALL_TIMEOUT = 60.0
 _CLOSE_TIMEOUT = 10.0
 
@@ -928,8 +1064,12 @@ class _SdkSessionBase:
         self._session = None
         self._closed = False
         _loop_thread().submit(self._lifecycle())
+        # OAuth 服务的连接期授权是交互流（浏览器 + 终端贴码），放宽就绪等待
+        timeout = (
+            OAUTH_CONNECT_TIMEOUT if server.auth == "oauth" else _CONNECT_TIMEOUT
+        )
         try:
-            self._ready.result(timeout=_CONNECT_TIMEOUT)
+            self._ready.result(timeout=timeout)
         except Exception as exc:
             self.close()
             raise McpError(f"MCP 服务连接失败：{explain_error(exc)}") from exc
@@ -1031,14 +1171,23 @@ class _SdkStdioSession(_SdkSessionBase):
 
 
 class _SdkStreamableHttpSession(_SdkSessionBase):
-    """streamable-http 会话：远程 endpoint 直连，密钥经请求头传递（展示脱敏）。"""
+    """streamable-http 会话：远程 endpoint 直连，密钥经请求头传递（展示脱敏）。
+
+    auth=oauth 时挂 SDK 授权对象（授权码 + PKCE + 过期自动刷新；issue #44），
+    静态请求头与 OAuth 授权共存（声明了什么就带什么）。
+    """
 
     async def _enter_transport(self, stack):
         import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
+        auth = None
+        if self._server.auth == "oauth":
+            from .mcp_auth import default_oauth
+
+            auth = default_oauth().provider(self._server)
         client = await stack.enter_async_context(
-            httpx2.AsyncClient(headers=dict(self._server.headers) or None)
+            httpx2.AsyncClient(headers=dict(self._server.headers) or None, auth=auth)
         )
         streams = await stack.enter_async_context(
             streamable_http_client(self._server.url, http_client=client)

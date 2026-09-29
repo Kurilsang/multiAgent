@@ -12,6 +12,7 @@ import app.server as server
 
 from tests.fakes import (
     FakeLLMClient,
+    FakeMcpOAuth,
     FakeMcpSession,
     load_catalog_fixture,
     make_mcp_tool,
@@ -75,7 +76,7 @@ class McpApiHarness(unittest.TestCase):
         text = payload if isinstance(payload, str) else json.dumps(payload)
         self.config.write_text(text, encoding="utf-8")
 
-    def wire(self):
+    def wire(self, oauth=None):
         (
             server.tool_registry,
             server.skill_registry,
@@ -83,7 +84,10 @@ class McpApiHarness(unittest.TestCase):
             server.agent_engine,
             server.mcp_manager,
         ) = server._build_wiring(
-            self.root, mcp_config=self.config, mcp_client_factory=self.factory
+            self.root,
+            mcp_config=self.config,
+            mcp_client_factory=self.factory,
+            mcp_oauth=oauth,
         )
 
 class McpApiTest(McpApiHarness):
@@ -335,6 +339,105 @@ class McpInstallTest(McpApiHarness):
         item = self.client.get("/mcp").json()["servers"][0]
         self.assertEqual(item["transport"], "streamable-http")
         self.assertEqual(item["header_keys"], ["Authorization"])
+
+
+def oauth_entry(**overrides):
+    entry = {
+        "name": "acme/remote",
+        "transport": "streamable-http",
+        "url": "https://mcp.acme.dev/db/mcp",
+        "auth": "oauth",
+    }
+    entry.update(overrides)
+    return entry
+
+
+class McpAuthApiTest(McpApiHarness):
+    """OAuth 授权状态暴露与重授权入口（issue #44 管理面）。"""
+
+    def test_listing_exposes_auth_fields(self):
+        self.write_config({"servers": [oauth_entry()]})
+        self.wire(oauth=FakeMcpOAuth(status="authorized"))
+        item = self.client.get("/mcp").json()["servers"][0]
+        self.assertEqual(item["auth"], "oauth")
+        self.assertEqual(item["auth_status"], "authorized")
+        self.assertNotIn("access_token", self.client.get("/mcp").text)  # token 不进清单
+
+    def test_reauth_clears_tokens_and_reconnects(self):
+        self.write_config({"servers": [oauth_entry()]})
+        fake = FakeMcpOAuth(status="expired")
+        self.wire(oauth=fake)
+        resp = self.client.post("/mcp/reauth", json={"name": "acme/remote"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(fake.clear_calls, ["acme/remote"])
+        self.assertEqual(len(self.requested), 2)  # 首连 + 重连
+        self.assertEqual(resp.json()["server"]["status"], "connected")
+
+    def test_reauth_unknown_name_returns_404(self):
+        self.write_config({"servers": [oauth_entry()]})
+        self.wire(oauth=FakeMcpOAuth())
+        resp = self.client.post("/mcp/reauth", json={"name": "nope/none"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_reauth_non_oauth_returns_400(self):
+        self.write_config({"servers": [good_entry()]})
+        self.wire(oauth=FakeMcpOAuth())
+        resp = self.client.post(
+            "/mcp/reauth", json={"name": "io.github.acme/filesystem"}
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_authorization_failure_surfaces_as_load_error(self):
+        from app.mcp import McpError
+
+        self.write_config({"servers": [oauth_entry()]})
+        self.wire(oauth=FakeMcpOAuth(error=McpError("设备码已过期、授权未完成——请重新发起授权")))
+        payload = self.client.get("/mcp").json()
+        self.assertTrue(payload["load_errors"])
+        self.assertIn("重新发起授权", payload["load_errors"][0])
+        self.assertEqual(payload["servers"][0]["status"], "error")
+
+    def test_install_remote_with_oauth_declaration(self):
+        self.catalog = FakeCatalogHttp()
+        self._orig_dotenv = server._DOTENV_PATH
+        server._DOTENV_PATH = Path(self._tmp.name) / ".env"
+        self.addCleanup(setattr, server, "_DOTENV_PATH", self._orig_dotenv)
+        self._orig_catalog = server._catalog_client
+        server._catalog_client = lambda: self.catalog
+        self.addCleanup(setattr, server, "_catalog_client", self._orig_catalog)
+        self.catalog.routes.append(
+            (
+                "/internal/detail",
+                FakeCatalogResponse(
+                    {
+                        "manifest_path": "server.json",
+                        "manifest_text": json.dumps(
+                            {
+                                "name": "acme/remote",
+                                "packages": [],
+                                "remotes": [
+                                    {
+                                        "type": "streamable-http",
+                                        "url": "https://mcp.acme.dev/db/mcp",
+                                        "authentication": {"type": "oauth"},
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                ),
+            )
+        )
+        self.write_config({"servers": []})
+        self.wire(oauth=FakeMcpOAuth())
+        data = self.client.post("/mcp/install", json={
+            "source": "catalog",
+            "catalog_id": "acme/remote",
+            "source_platform": "mcp-registry",
+        }).json()
+        self.assertEqual(data["results"][0]["status"], "installed")
+        item = self.client.get("/mcp").json()["servers"][0]
+        self.assertEqual(item["auth"], "oauth")  # 认证声明随安装贯通到连接定义
 
 
 if __name__ == "__main__":

@@ -4,7 +4,10 @@ import json
 import unittest
 
 from services.catalog.sources import build_sources
-from services.catalog.sources.mcp_registry import McpRegistrySource
+from services.catalog.sources.mcp_registry import (
+    McpRegistrySource,
+    _auth_declaration,
+)
 
 from tests.fakes import FakeHttpClient, FakeResponse, load_catalog_fixture
 
@@ -131,6 +134,7 @@ class McpRegistrySourceTest(unittest.TestCase):
         preview = json.loads(detail.manifest_text)["install_preview"]
         self.assertEqual(preview["transport"], "streamable-http")
         self.assertEqual(preview["url"], "https://mcp.acme.dev/db/mcp")
+        self.assertEqual(preview["auth"], "none")  # 未声明认证 = 静态密钥路径
         self.assertEqual(
             preview["headers"],
             [
@@ -182,6 +186,52 @@ class McpRegistrySourceTest(unittest.TestCase):
         self.assertEqual(error, "")
         for decl in manifest["install_preview"]["headers"]:
             self.assertEqual(server.headers[decl["name"]], "${" + decl["var"] + "}")
+
+    def test_remote_auth_declaration_maps_to_oauth(self):
+        """远程认证声明（authentication）→ 确认卡 auth 字段 + 连接定义 auth=oauth（跨边界同形）。"""
+        from app.mcp import parse_install_text
+
+        payload = {
+            "server": {
+                "name": "io.github.acme/oauth-db",
+                "packages": [],
+                "remotes": [
+                    {
+                        "type": "streamable-http",
+                        "url": "https://mcp.acme.dev/db/mcp",
+                        "authentication": {"type": "oauth"},
+                    }
+                ],
+            },
+            "_meta": {
+                "io.modelcontextprotocol.registry/official": {"status": "active"}
+            },
+        }
+        source = self.make_source(
+            {"/versions/latest": FakeResponse(json.dumps(payload))}
+        )
+        manifest = json.loads(source.detail("io.github.acme/oauth-db").manifest_text)
+        preview = manifest["install_preview"]
+        self.assertEqual(preview["transport"], "streamable-http")
+        self.assertEqual(preview["auth"], "oauth")
+        candidates, _warnings = parse_install_text(
+            json.dumps(manifest), source="catalog:mcp-registry"
+        )
+        _name, server, error = candidates[0]
+        self.assertEqual(error, "")
+        self.assertEqual(server.auth, "oauth")
+
+    def test_auth_declaration_flows_map_explicitly(self):
+        """显式流程声明（device_code/authorization_code）→ auth_flow 钉死；静态密钥声明保持 none。"""
+        for value, flow in (
+            ("device_code", "device_code"),
+            ("authorization_code", "authorization_code"),
+            ("oauth", "auto"),
+            ("bearer", "auto"),
+        ):
+            auth, auth_flow = _auth_declaration({"authentication": {"type": value}})
+            expected = "oauth" if value in ("device_code", "authorization_code", "oauth") else "none"
+            self.assertEqual((auth, auth_flow), (expected, flow))
 
     def test_detail_mcpb_only_marks_unsupported(self):
         """mcpb 单文件包：展示但标「暂不支持安装」（transport null + 原因）。"""

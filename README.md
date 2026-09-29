@@ -10,7 +10,7 @@
 - **工具 + 技能**：工具走 function calling 通道；技能为文件化提示词包（`skills/<名称>/SKILL.md`），动态清单 + `use_skill` 按需激活，Agent 可用 `create_skill` 自产技能
 - **技能市场**：预设平台 / Git URL / 本地目录安装（覆盖 anthropics/skills、skills.sh 等 SKILL.md 生态），WebUI 管理启停/删除/查看，热生效无需重启
 - **技能在线目录**：独立爬取服务（`services/catalog/`，隔离区）抓取 skills.sh / LobeHub / 官方 MCP Registry 目录——SQLite 缓存 + 定时刷新 + 陈旧标注；市场页「在线浏览」搜索翻页（技能 / MCP 按资产类型过滤）→ 单次确认卡（manifest 预览 + 审计徽标）→ 一键安装；外网元数据交互集中在隔离区（可独立部署升级），MCP 会话流量由主服务直连远程端点（见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）
-- **MCP 市场与 MCP 工具**：MCP 服务安装为声明式连接定义（`mcp/servers.json`，密钥只以 `${VAR}` 占位写入 `.env`，手写同权、重载生效）；确认卡展示命令原文/endpoint + 域名 + 密钥表单（isSecret 走密码框），单次确认即安装并收集密钥；启用服务的工具以 `mcp__<服务短名>__<工具名>` 灌入工具注册表，聊天/任务两通道即装即用；观察值视图截断 + `read_tool_result` 旁存续读
+- **MCP 市场与 MCP 工具**：MCP 服务安装为声明式连接定义（`mcp/servers.json`，密钥只以 `${VAR}` 占位写入 `.env`，手写同权、重载生效）；确认卡展示命令原文/endpoint + 域名 + 密钥表单（isSecret 走密码框），单次确认即安装并收集密钥；启用服务的工具以 `mcp__<服务短名>__<工具名>` 灌入工具注册表，聊天/任务两通道即装即用；观察值视图截断 + `read_tool_result` 旁存续读；OAuth 保护的远程服务走动态授权流（`auth: oauth`：授权码 + PKCE 终端贴码 / 无头设备码，token 独立存储自动刷新）
 - **双通道调用**：任务通道全量工具 + 自主激活；聊天通道注入清单、模型自主判断是否借助技能；`/技能名 …` 显式点名确定性升级为任务
 - **运行时切换**：CLI 中 `/model glm` 随时切换厂商；API 请求中传 `provider` 字段
 - **思考链展示**：`reasoning_content` 字段（GLM / DeepSeek 思考模型）与内联 `<think>` 标签（MiniMax M 系列）统一转写，WebUI / CLI / 任务时间线均实时展示，不污染对话历史
@@ -115,11 +115,12 @@ curl "http://127.0.0.1:8000/market/detail?id=owner/repo/skill&source=skills-sh"
 curl -X POST http://127.0.0.1:8000/market/refresh -H "Content-Type: application/json" -d '{}'
 
 # MCP 管理（连接定义 = mcp/servers.json，改动可经重载生效；工具即装即用）
-curl http://127.0.0.1:8000/mcp                          # 服务列表（状态 + 工具 + 加载错误；值脱敏）
+curl http://127.0.0.1:8000/mcp                          # 服务列表（状态 + 工具 + 授权状态 + 加载错误；值脱敏）
 curl -X POST http://127.0.0.1:8000/mcp/enable  -H "Content-Type: application/json" -d '{"name": "io.github.acme/filesystem"}'
 curl -X POST http://127.0.0.1:8000/mcp/disable -H "Content-Type: application/json" -d '{"name": "io.github.acme/filesystem"}'
 curl -X POST http://127.0.0.1:8000/mcp/remove  -H "Content-Type: application/json" -d '{"name": "io.github.acme/filesystem"}'
 curl -X POST http://127.0.0.1:8000/mcp/reload                          # 手改连接定义文件后重载重连
+curl -X POST http://127.0.0.1:8000/mcp/reauth  -H "Content-Type: application/json" -d '{"name": "acme/remote"}'   # OAuth 服务重新授权（清 token 并重连）
 # 安装 MCP：目录条目（env_values 为密钥值，只入 .env）/ 本地 server.json、mcp.json 导入
 curl -X POST http://127.0.0.1:8000/mcp/install \
   -H "Content-Type: application/json" \
@@ -150,6 +151,7 @@ app/
 ├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、动态技能清单/预激活
 ├── skills.py        # 技能注册表：SKILL.md 解析/校验/自产、启停状态、安装器（Git/本地）
 ├── mcp.py           # MCP 连接定义模型 + 运行时管理器（client factory 测试缝、stdio/streamable-http 会话）
+├── mcp_auth.py      # MCP 动态 OAuth 授权（token 文件存储 + 授权码/PKCE 贴码 + 设备码 + 授权状态）
 ├── observation.py   # 观察值视图 + 旁存续读（内存句柄池 LRU、read_tool_result 元工具）
 ├── tools.py         # 工具注册表 + 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）
 ├── export.py        # 对话导出格式化（markdown / json 纯函数）
@@ -179,6 +181,7 @@ tests/
 ├── test_skills.py       # 技能注册表、元工具与安装器
 ├── test_skills_api.py   # 技能管理 HTTP API
 ├── test_mcp.py          # 连接定义模型 + 运行时管理器（fake client factory）
+├── test_mcp_auth.py     # 动态 OAuth 授权流（token 存储/设备码/贴码/管理面，注入缝 fake）
 ├── test_mcp_api.py      # MCP 管理面 HTTP API
 ├── test_mcp_anchor.py   # 真协议锚点（官方 SDK stdio 跑通 echo server）
 ├── test_observation.py  # 观察值视图与旁存续读
@@ -202,7 +205,7 @@ tests/
 
 技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）；`CATALOG_BASE_URL` 指向技能在线目录爬取服务（默认 `http://127.0.0.1:8100`，留空则关闭在线目录并隐藏入口）；`CATALOG_AUTOSTART` 控制主服务是否自动托管本机爬取服务（默认开，外部部署/自行管理时置 0）。爬取服务自身配置（`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` / `CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`）见 [services/catalog/README.md](services/catalog/README.md)。
 
-MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）。
+MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`MCP_TOKEN_FILE` 为 OAuth token 文件（默认 `mcp/tokens.json`，`auth: oauth` 服务的授权产物：权限收紧、不入库、不进 `.env` 明文）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）。
 
 如需按厂商覆盖接入端点，设置 `<厂商>_BASE_URL`（如 `GLM_BASE_URL`）。典型场景：GLM Coding Plan 套餐 Key 只对编码专用端点生效，需设置 `GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`，否则标准端点会报 1113 余额不足。
 
@@ -229,7 +232,7 @@ python -m unittest discover tests -v
 
 - 单会话内存上下文：服务重启后历史与任务轨迹清空；接口内部已加锁串行化，适合单用户/低并发使用
 - Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
-- MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；密钥仅支持静态 env/header（`${VAR}` 占位 + `.env`）——OAuth 保护的服务用对方长期 API Key/PAT 变通，动态授权流见 #44；mcpb 单文件包条目暂不支持安装（后续扩展点）；官方 MCP Registry 处于 preview 阶段（schema 可能变更），默认翻到游标耗尽（2000 页硬上限防失控）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令（确认卡已披露命令原文）
+- MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；密钥支持静态 env/header（`${VAR}` 占位 + `.env`，推荐长期 PAT）与 `auth: oauth` 动态授权流（授权码 + PKCE 终端贴码 / 无头设备码；token 存 `MCP_TOKEN_FILE` 独立文件、过期自动刷新，刷新失败降级为连接错误提示重新授权；OAuth 首次授权在装配期终端交互完成，无浏览器自助重定向服务）；mcpb 单文件包条目暂不支持安装（后续扩展点）；官方 MCP Registry 处于 preview 阶段（schema 可能变更），默认翻到游标耗尽（2000 页硬上限防失控）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令（确认卡已披露命令原文）
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
 - SSE 断连后任务不恢复，页面重开需重新发起

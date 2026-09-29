@@ -921,6 +921,10 @@ function skillCard(s) {
   return card;
 }
 
+function authStatusText(s) {
+  return s === 'authorized' ? '已授权' : s === 'expired' ? '已过期' : '未授权';
+}
+
 function mcpCard(s) {
   const card = document.createElement('div');
   card.className = 'skill-card' + (s.enabled && s.status !== 'error' ? '' : ' off');
@@ -944,6 +948,12 @@ function mcpCard(s) {
   head.appendChild(name);
   head.appendChild(transport);
   head.appendChild(status);
+  if (s.auth === 'oauth') {
+    const auth = document.createElement('span');
+    auth.className = 'badge' + (s.auth_status === 'authorized' ? ' pass' : s.auth_status === 'expired' ? ' fail' : '');
+    auth.textContent = 'OAuth · ' + authStatusText(s.auth_status);
+    head.appendChild(auth);
+  }
   head.appendChild(source);
   card.appendChild(head);
 
@@ -981,6 +991,18 @@ function mcpCard(s) {
   delBtn.textContent = '删除';
   actions.appendChild(viewBtn);
   actions.appendChild(toggleBtn);
+  if (s.auth === 'oauth') {
+    const reauthBtn = document.createElement('button');
+    reauthBtn.textContent = '重新授权';
+    reauthBtn.title = '清除已存 token 并重新走授权流（token 独立存储于 MCP_TOKEN_FILE）';
+    reauthBtn.addEventListener('click', async () => {
+      try {
+        await postJson('/mcp/reauth', { name: s.name });
+        await loadInstalled();
+      } catch (e) { toast('重新授权失败：' + e.message); }
+    });
+    actions.appendChild(reauthBtn);
+  }
   actions.appendChild(delBtn);
   card.appendChild(actions);
 
@@ -998,6 +1020,7 @@ function mcpCard(s) {
         : 'url: ' + (s.url || ''),
       'source: ' + s.source,
       'status: ' + s.status + (s.error ? '（' + s.error + '）' : ''),
+      'auth: ' + (s.auth === 'oauth' ? 'oauth（' + authStatusText(s.auth_status) + '）' : 'none'),
       'env: ' + ((s.env_keys || []).join('、') || '（无）'),
       'headers: ' + ((s.header_keys || []).join('、') || '（无）'),
       'tools: ' + ((s.tools || []).join('、') || '（无）'),
@@ -1453,7 +1476,13 @@ function renderCapability(manifest) {
     addLine('Endpoint（streamable-http）:');
     addLine(preview.url || '', true);
     addLine('域名: ' + hostOf(preview.url || ''));
-    risk.textContent = '确认 = 授权本服务连接该远程端点并发送所填密钥';
+    if (preview.auth === 'oauth') {
+      addLine('授权: OAuth 动态授权流（' + (preview.auth_flow && preview.auth_flow !== 'auto'
+        ? preview.auth_flow : '授权码 + PKCE，无头环境用设备码') + '，token 独立存储并自动刷新，不进 .env）');
+      risk.textContent = '确认 = 授权本服务连接该远程端点并在终端完成 OAuth 授权';
+    } else {
+      risk.textContent = '确认 = 授权本服务连接该远程端点并发送所填密钥';
+    }
   } else {
     addLine('暂不支持安装：' + (preview.reason || '条目无可安装形态'));
   }

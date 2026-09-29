@@ -29,7 +29,7 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 - `app/conversation.py` — 主对话内存历史，按 `MAX_CONTEXT_MESSAGES` 截断（保留 system + 最近 N 条）
 - `app/agent.py` — ReAct 状态机引擎（见 docs/adr/0001、0002）：任务轨迹独立于主对话，双层终止（finish 工具 + `AGENT_MAX_ITERATIONS` 硬上限 + 死循环止损）；技能走上下文通道（动态清单 + run(activated=) 预激活）
 - `app/skills.py` — 技能注册表：SKILL.md 解析/校验（frontmatter 三字段白名单）、自产（create_skill）、启停状态（`skills/.installed.json`）、安装器（Git 适配器/本地导入）；文件态是唯一事实源，热重载
-- `app/mcp.py` — MCP 连接定义模型（`MCP_CONFIG` 解析/校验/${VAR} 占位/命名清洗 fail loud）+ 运行时管理器（client factory 测试缝、默认官方 mcp SDK stdio 会话）
+- `app/mcp.py` — MCP 连接定义模型（`MCP_CONFIG` 解析/校验/${VAR} 占位/命名清洗 fail loud）+ 运行时管理器（client factory 测试缝、默认官方 mcp SDK 会话 stdio / streamable-http、错误展平到叶子原因）
 - `app/observation.py` — 观察值视图 + 旁存续读（内存句柄池 LRU、read_tool_result 元工具）
 - `app/tools.py` — 工具注册表（function calling 通道）+ 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）；新增工具只改注册表，引擎不感知（聊天通道另有工具允许集判定，见 server）；full_result=True 的观察值完整回灌不截断
 - `app/cli.py` / `app/server.py` — 两个入口；server 的 `/chat`、`/chat/stream`、`/agent/stream`、`/skills*`、`/mcp*`、`/market*` 共用线程锁串行化，定位单用户/低并发；聊天通道带 `CHAT_MAX_TOOL_TURNS` 有界迷你工具循环，`/技能名` 前缀确定性路由任务通道并预激活
@@ -41,8 +41,8 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 ## 当前状态与下一步
 
 - 已完成：三厂商对话、上下文截断、运行时切厂商、ReAct 单 Agent 循环（function calling + 工具/技能注册表）、CLI + WebUI 全链路流式 SSE、双层终止与死循环止损、思考链统一转写与展示（reasoning_content / 内联 `<think>` → ReasoningDelta）、对话导出（WebUI 导出按钮、CLI `/export`、HTTP `GET /export`）、技能市场（SKILL.md 文件化技能包、动态清单 + use_skill/search_skills/create_skill 元工具、聊天通道自主激活与 `/技能名` 前缀路由、Git/本地安装与启停删管理 API、WebUI `/` 弹层与市场视图）、技能在线目录（services/catalog 爬取服务隔离区：skills.sh HTML 降级 + LobeHub M2M 市场 API、SQLite 缓存 + 定时刷新、/market/* 代理、目录包安装 source=catalog、WebUI 在线浏览 + 单次确认卡）、MCP 市场（#32-#39 全部落地：目录 schema 泛化 kind + 通用 manifest 合同、连接定义与启动装配 stdio 真协议闭环、观察值视图与旁存续读 read_tool_result、远程 streamable-http 接入 + 断连重连、管理面与聊天通道工具暴露、官方 MCP Registry 适配器与安装来源、WebUI 统一市场与 MCP 单次确认卡、文档与配置同步收口）
-- 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`）或 `/技能名` 点名，无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复；第三方技能包是提示注入面（格式校验兜底，不做内容审计）；skills.sh 官方 API 为 OIDC 专属（走 HTML 降级，页面改版需跟进适配器）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；MCP 支持 stdio + streamable-http（sse 不做），mcpb 单文件包暂不可安装（后续扩展点），Registry 目录为游标拉取（updated_since 真增量未做；默认翻到见底、2000 页硬上限防失控，极端规模截断有告警），stdio 无沙箱（argv 直起、确认卡披露命令原文）
-- 下一步：多 Agent 协作（状态机已留后门：新增状态与迁移边）、ClawHub 适配器与已验证源免确认白名单、`/` 弹层混入在线目录、多会话持久化、网关逻辑（路由/鉴权/审计）
+- 已知限制：重启后历史与轨迹清空；任务显式触发（CLI `/agent`、HTTP `/agent/stream`）或 `/技能名` 点名，无自动路由；端点不支持 tools 时直接报错（无文本协议降级）；SSE 断连任务不恢复；第三方技能包是提示注入面（格式校验兜底，不做内容审计）；skills.sh 官方 API 为 OIDC 专属（走 HTML 降级，页面改版需跟进适配器）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；MCP 支持 stdio + streamable-http（sse 不做），仅静态 env/header 密钥（OAuth 服务用长期 PAT 变通，动态授权流见 #44），mcpb 单文件包暂不可安装（后续扩展点），Registry 目录为游标拉取（updated_since 真增量未做；默认翻到见底、2000 页硬上限防失控，极端规模截断有告警），stdio 无沙箱（argv 直起、确认卡披露命令原文）
+- 下一步：动态 OAuth 授权流（#44 已开票）、多 Agent 协作（状态机已留后门：新增状态与迁移边）、ClawHub 适配器与已验证源免确认白名单、`/` 弹层混入在线目录、多会话持久化、网关逻辑（路由/鉴权/审计）
 
 ## Agent skills
 

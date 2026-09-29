@@ -43,7 +43,7 @@ class McpRegistrySource:
         落源状态提示用户主动触发全量抓取。
         updated_since 真增量（含 deleted tombstone）待 store 支持合并后启用。
         """
-        self.crawl_warnings = []
+        warnings: list[str] = []
         entries: list[CatalogEntry] = []
         cursor = ""
         if max_pages and max_pages > 0:
@@ -63,10 +63,11 @@ class McpRegistrySource:
             if not cursor:
                 break
         if cursor:  # 预算耗尽仍未见底：缓存不完整，告警可见
-            self.crawl_warnings.append(
+            warnings.append(
                 f"已截断：仅爬取前 {limit} 页（{len(entries)} 条），仍有更多"
                 f"——可触发「全量抓取」补齐"
             )
+        self.crawl_warnings = warnings  # 整体赋值：并发爬取下不叠加
         if not entries:
             raise CatalogError(
                 "MCP Registry 解析为空（API 结构可能已变更），请检查适配器", 502

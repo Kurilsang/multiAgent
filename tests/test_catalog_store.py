@@ -214,6 +214,36 @@ class RefresherTest(unittest.TestCase):
         self.assertEqual(clean.crawl_max_pages, [3])  # 未传预算走适配器默认
         self.assertEqual(results[0]["warnings"], [])
 
+    def test_refresh_skips_when_running_and_dedupes_warnings(self):
+        store = MemoryStore()
+        release = threading.Event()
+        started = threading.Event()
+
+        class BlockingSource(FakeCatalogSource):
+            def crawl(self, max_pages: int = 3):
+                started.set()
+                release.wait(5)
+                return super().crawl(max_pages=max_pages)
+
+        slow = BlockingSource(
+            name="a",
+            entries=make_catalog_entries(1, source="a"),
+            warnings=["已截断", "已截断"],  # 并发爬取曾把告警叠加两遍
+        )
+        thread = threading.Thread(target=refresh_now, args=({"a": slow}, store))
+        thread.start()
+        try:
+            self.assertTrue(started.wait(2))
+            skipped = refresh_now({"a": slow}, store)  # 并发触发：跳过，不重复爬
+            self.assertEqual(skipped[0]["status"], "refreshing")
+        finally:
+            release.set()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        results = refresh_now({"a": slow}, store)
+        self.assertEqual(results[0]["warnings"], ["已截断"])  # 重复告警去重
+        self.assertEqual(store.sources()[0]["warning"], "已截断")
+
     def test_refresh_now_unknown_source_reported(self):
         results = refresh_now({}, MemoryStore(), ["nope"])
         self.assertEqual(results[0]["status"], "unknown_source")

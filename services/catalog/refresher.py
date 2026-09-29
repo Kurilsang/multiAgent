@@ -2,6 +2,7 @@
 
 单源失败只记错不毁全局（降级读缓存 + stale 标注）；刷新在存储层锁内
 落库，搜索读不被外网 IO 阻塞。定时器为守护线程，随进程退出。
+同进程爬取互斥：进行中的刷新不被并发触发重复爬（跳过并报 refreshing）。
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ import threading
 from datetime import datetime, timezone
 
 from .store import CatalogStore
+
+_refresh_guard = threading.Lock()
 
 
 def _now() -> str:
@@ -22,7 +25,19 @@ def refresh_now(
     """一次爬取：逐源拉目录入库，返回逐源结果报告（含截断等非致命告警）。
 
     max_pages 是页数预算（0 = 各适配器默认上限）；主动传更大预算即「抓取更多」。
+    已有刷新进行中时直接跳过（不并发重复爬外网）。
     """
+    if not _refresh_guard.acquire(blocking=False):
+        return [{"source": "*", "status": "refreshing", "detail": "已有刷新进行中"}]
+    try:
+        return _crawl_all(sources, store, names, max_pages)
+    finally:
+        _refresh_guard.release()
+
+
+def _crawl_all(
+    sources: dict, store: CatalogStore, names: list[str] | None, max_pages: int
+) -> list[dict]:
     results: list[dict] = []
     for name in names if names is not None else sorted(sources):
         source = sources.get(name)
@@ -38,7 +53,9 @@ def refresh_now(
             results.append({"source": name, "status": "error", "detail": str(exc)})
             continue
         store.replace_source(name, list(entries), _now())
-        warnings = [str(item) for item in getattr(source, "crawl_warnings", ()) if item]
+        warnings = list(
+            dict.fromkeys(str(item) for item in getattr(source, "crawl_warnings", ()) if item)
+        )
         if warnings:  # 如截断：缓存可用但不完整，落源状态（replace 已清旧告警）
             store.record_warning(name, "；".join(warnings))
         results.append(

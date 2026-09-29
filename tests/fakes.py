@@ -187,18 +187,21 @@ class FakeResponse:
 class FakeCatalogSource:
     """脚本化的目录源：crawl/detail/fetch_pack 可预设结果或错误。"""
 
-    def __init__(self, name="fake", entries=None, detail=None, pack=None, error=None):
+    def __init__(self, name="fake", entries=None, detail=None, pack=None, error=None, warnings=()):
         self.name = name
         self.entries = entries or []
         self.detail_result = detail
         self.pack_result = pack
         self.error = error
+        self.crawl_warnings = list(warnings)  # 非致命告警（如截断），crawl 后被读取
         self.crawl_calls = 0
+        self.crawl_max_pages: list[int] = []
         self.detail_calls: list[str] = []
         self.pack_calls: list[str] = []
 
     def crawl(self, max_pages: int = 3):
         self.crawl_calls += 1
+        self.crawl_max_pages.append(max_pages)
         if self.error is not None:
             raise self.error
         return list(self.entries)

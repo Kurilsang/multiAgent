@@ -56,6 +56,21 @@ class McpRegistrySourceTest(unittest.TestCase):
         entries = self.make_source().crawl(max_pages=1)
         self.assertEqual(len(entries), 2)  # 只拉首页（deleted 已剔除）
 
+    def test_crawl_budget_truncation_warns_and_deep_crawl_clears(self):
+        source = self.make_source()
+        source.crawl(max_pages=1)  # 预算 1 页：拉完首页 cursor 仍有剩余
+        self.assertTrue(any("截断" in item for item in source.crawl_warnings))
+        source.crawl()  # 全量：翻到 cursor 耗尽
+        self.assertEqual(source.crawl_warnings, [])
+
+    def test_crawl_clamps_explicit_budget_to_hard_cap(self):
+        source = self.make_source()
+        source.crawl(max_pages=10**6)  # 硬上限封顶，仍翻到 cursor 耗尽
+        self.assertEqual(source.crawl_warnings, [])
+        self.assertTrue(
+            any("cursor=page2cursor" in url for _m, url, _k in self.client.calls)
+        )
+
     def test_detail_returns_manifest_with_declarations(self):
         detail = self.make_source().detail("io.github.acme/filesystem")
         self.assertEqual(detail.manifest_path, "server.json")

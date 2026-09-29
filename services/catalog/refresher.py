@@ -16,8 +16,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def refresh_now(sources: dict, store: CatalogStore, names: list[str] | None = None) -> list[dict]:
-    """一次爬取：逐源拉目录入库，返回逐源结果报告。"""
+def refresh_now(
+    sources: dict, store: CatalogStore, names: list[str] | None = None, max_pages: int = 0
+) -> list[dict]:
+    """一次爬取：逐源拉目录入库，返回逐源结果报告（含截断等非致命告警）。
+
+    max_pages 是页数预算（0 = 各适配器默认上限）；主动传更大预算即「抓取更多」。
+    """
     results: list[dict] = []
     for name in names if names is not None else sorted(sources):
         source = sources.get(name)
@@ -27,13 +32,18 @@ def refresh_now(sources: dict, store: CatalogStore, names: list[str] | None = No
             )
             continue
         try:
-            entries = source.crawl()
+            entries = source.crawl(max_pages=max_pages) if max_pages else source.crawl()
         except Exception as exc:  # 爬取失败属于常态：记录并继续其他源
             store.record_error(name, str(exc))
             results.append({"source": name, "status": "error", "detail": str(exc)})
             continue
         store.replace_source(name, list(entries), _now())
-        results.append({"source": name, "status": "ok", "count": len(entries)})
+        warnings = [str(item) for item in getattr(source, "crawl_warnings", ()) if item]
+        if warnings:  # 如截断：缓存可用但不完整，落源状态（replace 已清旧告警）
+            store.record_warning(name, "；".join(warnings))
+        results.append(
+            {"source": name, "status": "ok", "count": len(entries), "warnings": warnings}
+        )
     return results
 
 

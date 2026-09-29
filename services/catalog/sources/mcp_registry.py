@@ -20,6 +20,8 @@ from ..schema import CatalogDetail, CatalogEntry, CatalogError, CatalogPack
 BASE_URL = "https://registry.modelcontextprotocol.io"
 PAGE_TIMEOUT = 20
 PAGE_SIZE = 100
+DEFAULT_PAGES = 200  # 默认页数预算（约 2 万条）防失控；显式 max_pages 可抓更多
+MAX_PAGES = 2000  # 硬上限（约 20 万条），防游标异常时无限翻页
 USER_AGENT = "multiagent-catalog/1.0 (+https://github.com/Kurilsang/multiAgent)"
 _OFFICIAL_META = "io.modelcontextprotocol.registry/official"
 
@@ -31,16 +33,23 @@ class McpRegistrySource:
 
     def __init__(self, settings=None, creds_store=None, client=None):
         self._client = client
+        self.crawl_warnings: list[str] = []  # 最近一次 crawl 的非致命告警（如截断）
 
     def crawl(self, max_pages: int = 0) -> list[CatalogEntry]:
-        """全量游标拉取（max_pages=0 = 翻到 cursor 耗尽，硬上限 200 页防失控）。
+        """全量游标拉取（max_pages=0 = 默认 DEFAULT_PAGES 页预算，显式值可抓更多）。
 
-        缓存模型是整批替换，必须全量——限页会把未爬到的条目清出目录。
+        缓存模型是整批替换，必须尽量全量——限页会把未爬到的条目清出目录。
+        页数预算耗尽而游标仍有剩余 → 记截断告警（crawl_warnings），由刷新层
+        落源状态提示用户主动触发全量抓取。
         updated_since 真增量（含 deleted tombstone）待 store 支持合并后启用。
         """
+        self.crawl_warnings = []
         entries: list[CatalogEntry] = []
         cursor = ""
-        limit = max_pages if max_pages and max_pages > 0 else 200
+        if max_pages and max_pages > 0:
+            limit = min(max_pages, MAX_PAGES)
+        else:
+            limit = DEFAULT_PAGES
         for _ in range(limit):
             url = f"{BASE_URL}/v0.1/servers?limit={PAGE_SIZE}&version=latest"
             if cursor:
@@ -53,6 +62,11 @@ class McpRegistrySource:
             cursor = str((data.get("metadata") or {}).get("nextCursor") or "")
             if not cursor:
                 break
+        if cursor:  # 预算耗尽仍未见底：缓存不完整，告警可见
+            self.crawl_warnings.append(
+                f"已截断：仅爬取前 {limit} 页（{len(entries)} 条），仍有更多"
+                f"——可触发「全量抓取」补齐"
+            )
         if not entries:
             raise CatalogError(
                 "MCP Registry 解析为空（API 结构可能已变更），请检查适配器", 502

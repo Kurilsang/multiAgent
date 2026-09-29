@@ -19,7 +19,12 @@ class CatalogSource(Protocol):
     name: str
 
     def crawl(self, max_pages: int = 3) -> list[CatalogEntry]:
-        """枚举目录条目（刷新用）；网络失败抛 CatalogError。"""
+        """枚举目录条目（刷新用）；网络失败抛 CatalogError。
+
+        max_pages 是页数预算（0/缺省 = 适配器默认上限）；预算耗尽而数据未见底
+        时，适配器可把截断告警写入 self.crawl_warnings（可选属性，缺省无告警），
+        由刷新层落源状态提示用户主动触发更大预算的抓取。
+        """
         ...
 
     def detail(self, ref: str) -> CatalogDetail:

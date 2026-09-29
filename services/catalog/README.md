@@ -27,11 +27,11 @@ python -m services.catalog                          # 默认 127.0.0.1:8100
 
 ```
 GET  /health                  健康检查（app 身份标识 multiagent-catalog）
-GET  /internal/sources        各源状态（last_refresh / entry_count / last_error / stale）
+GET  /internal/sources        各源状态（last_refresh / entry_count / last_error / stale / warning）
 GET  /internal/search         ?q=&source=&kind=&page=&page_size= 统一条目分页（读缓存；条目含 kind：skill|mcp，kind= 按资产类型过滤）
 GET  /internal/detail         ?id=&source= 确认卡预览（manifest_path/manifest_text + 审计明细）
 GET  /internal/pack/{ref}     ?source= 目录包：manifest 文件集（manifest_path 指定 manifest 文件）+ 附带文件清单
-POST /internal/refresh        {"source"?: "..."} 一次爬取（逐源降级，单源失败不毁全局）
+POST /internal/refresh        {"source"?: "...", "max_pages"?: N} 一次爬取（逐源降级；max_pages=页数预算，0=适配器默认上限；截断等非致命告警随结果与源状态可见）
 ```
 
 ## 目录

@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE TABLE IF NOT EXISTS source_state (
   source TEXT PRIMARY KEY,
   last_refresh TEXT NOT NULL DEFAULT '',
-  last_error TEXT NOT NULL DEFAULT ''
+  last_error TEXT NOT NULL DEFAULT '',
+  warning TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS creds (
   source TEXT PRIMARY KEY,
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS creds (
 );
 """
 
-_DEFAULT_STATE = {"last_refresh": "", "last_error": "", "entry_count": 0}
+_DEFAULT_STATE = {"last_refresh": "", "last_error": "", "entry_count": 0, "warning": ""}
 
 
 class CatalogStore(Protocol):
@@ -54,6 +55,8 @@ class CatalogStore(Protocol):
     ) -> None: ...
 
     def record_error(self, source: str, error: str) -> None: ...
+
+    def record_warning(self, source: str, warning: str) -> None: ...
 
     def search(
         self, q: str = "", source: str = "", kind: str = "", page: int = 1, page_size: int = 20
@@ -71,6 +74,7 @@ def _state_row(name: str, row: dict, count: int) -> dict:
         "last_error": row["last_error"],
         "entry_count": count,
         "stale": bool(row["last_error"]) or not row["last_refresh"],
+        "warning": row.get("warning", ""),
     }
 
 
@@ -90,12 +94,18 @@ class MemoryStore:
             "last_refresh": refreshed_at,
             "last_error": "",
             "entry_count": len(entries),
+            "warning": "",
         }
         self._refreshed_at = refreshed_at
 
     def record_error(self, source: str, error: str) -> None:
         state = self._state.setdefault(source, dict(_DEFAULT_STATE))
         state["last_error"] = error
+        state["entry_count"] = len(self._entries.get(source, ()))
+
+    def record_warning(self, source: str, warning: str) -> None:
+        state = self._state.setdefault(source, dict(_DEFAULT_STATE))
+        state["warning"] = warning
         state["entry_count"] = len(self._entries.get(source, ()))
 
     def search(
@@ -139,6 +149,7 @@ class SqliteStore:
             "ALTER TABLE entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill'",
             "ALTER TABLE entries ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE entries ADD COLUMN status_message TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE source_state ADD COLUMN warning TEXT NOT NULL DEFAULT ''",
         ):
             try:  # 旧库迁移：缺列补齐
                 self._conn.execute(column_sql)
@@ -176,6 +187,18 @@ class SqliteStore:
             )
             self._conn.commit()
 
+    def record_warning(self, source: str, warning: str) -> None:
+        """记录非致命告警（如截断）：不影响 stale 语义，replace_source 时清除。"""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO source_state"
+                " (source, last_refresh, last_error, warning)"
+                " VALUES (?, COALESCE((SELECT last_refresh FROM source_state WHERE source = ?), ''),"
+                " COALESCE((SELECT last_error FROM source_state WHERE source = ?), ''), ?)",
+                (source, source, source, warning),
+            )
+            self._conn.commit()
+
     def search(
         self, q: str = "", source: str = "", kind: str = "", page: int = 1, page_size: int = 20
     ) -> tuple[list[CatalogEntry], int]:
@@ -208,7 +231,7 @@ class SqliteStore:
     def sources(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT source, last_refresh, last_error FROM source_state"
+                "SELECT source, last_refresh, last_error, warning FROM source_state"
             ).fetchall()
             counts = dict(self._conn.execute(
                 "SELECT source, COUNT(*) FROM entries GROUP BY source"
@@ -216,10 +239,14 @@ class SqliteStore:
         return [
             _state_row(
                 name,
-                {"last_refresh": last_refresh, "last_error": last_error},
+                {
+                    "last_refresh": last_refresh,
+                    "last_error": last_error,
+                    "warning": warning,
+                },
                 counts.get(name, 0),
             )
-            for name, last_refresh, last_error in sorted(rows)
+            for name, last_refresh, last_error, warning in sorted(rows)
         ]
 
     def refreshed_at(self) -> str:

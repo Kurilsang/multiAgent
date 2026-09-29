@@ -127,6 +127,15 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertIn("平台不可达", state["last_error"])
         self.assertEqual(self.store.search()[1], 5)  # 降级读缓存
 
+    def test_record_warning_visible_without_stale_and_cleared_by_replace(self):
+        self.store.replace_source("fake", make_catalog_entries(2), "t1")
+        self.store.record_warning("fake", "已截断：仅爬取前 200 页，仍有更多")
+        state = self.store.sources()[0]
+        self.assertIn("截断", state["warning"])
+        self.assertFalse(state["stale"])  # 截断告警 ≠ 抓取失败
+        self.store.replace_source("fake", make_catalog_entries(3), "t2")  # 完整爬取清告警
+        self.assertEqual(self.store.sources()[0]["warning"], "")
+
     def test_successful_replace_resets_stale(self):
         self.store.replace_source("fake", make_catalog_entries(1), "t1")
         self.store.record_error("fake", "x")
@@ -188,6 +197,22 @@ class RefresherTest(unittest.TestCase):
         state = {item["source"]: item for item in store.sources()}
         self.assertEqual(state["a"]["entry_count"], 3)
         self.assertTrue(state["b"]["stale"])
+
+    def test_refresh_passes_page_budget_and_records_truncation_warning(self):
+        store = MemoryStore()
+        source = FakeCatalogSource(
+            name="a",
+            entries=make_catalog_entries(2, source="a"),
+            warnings=["已截断：仅爬取前 3 页，仍有更多"],
+        )
+        results = refresh_now({"a": source}, store, max_pages=9)
+        self.assertEqual(source.crawl_max_pages, [9])  # 主动预算透传给适配器
+        self.assertEqual(results[0]["warnings"], ["已截断：仅爬取前 3 页，仍有更多"])
+        self.assertIn("截断", store.sources()[0]["warning"])  # 告警落源状态
+        clean = FakeCatalogSource(name="b", entries=[])
+        results = refresh_now({"b": clean}, store)
+        self.assertEqual(clean.crawl_max_pages, [3])  # 未传预算走适配器默认
+        self.assertEqual(results[0]["warnings"], [])
 
     def test_refresh_now_unknown_source_reported(self):
         results = refresh_now({}, MemoryStore(), ["nope"])

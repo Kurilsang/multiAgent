@@ -316,7 +316,7 @@ class MarketRefreshTest(unittest.TestCase):
     def test_refresh_triggers_background_crawl_with_long_timeout(self):
         fake = self._blocking_http()
         server._catalog_client = lambda: fake
-        resp = self.client.post("/market/refresh", json={})
+        resp = self.client.post("/market/refresh", json={"max_pages": 7})
         self.assertEqual(resp.json(), {"status": "started"})
         self.assertTrue(self._started.wait(2))
         self._release.set()
@@ -324,6 +324,7 @@ class MarketRefreshTest(unittest.TestCase):
         method, path, kwargs = fake.calls[0]
         self.assertEqual((method, path), ("POST", "/internal/refresh"))
         self.assertGreaterEqual(kwargs.get("timeout", 0), 60)  # 不再被 15s 代理超时腰斩
+        self.assertEqual(kwargs.get("json"), {"max_pages": 7})  # 页数预算透传
 
     def test_refresh_dedupes_while_running(self):
         fake = self._blocking_http()

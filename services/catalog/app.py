@@ -39,6 +39,7 @@ def create_app(sources: dict, store: CatalogStore) -> FastAPI:
                     "last_error": "",
                     "entry_count": 0,
                     "stale": True,
+                    "warning": "",
                 },
             )
         return {"sources": sorted(known.values(), key=lambda item: item["source"])}
@@ -80,7 +81,11 @@ def create_app(sources: dict, store: CatalogStore) -> FastAPI:
     def refresh(payload: dict | None = None) -> dict:
         requested = (payload or {}).get("source") or ""
         names = [requested] if requested else None
-        return {"results": refresh_now(sources, store, names)}
+        try:  # max_pages：页数预算（0 = 适配器默认上限），主动传更大值即抓取更多
+            max_pages = max(0, int((payload or {}).get("max_pages") or 0))
+        except (TypeError, ValueError):
+            max_pages = 0
+        return {"results": refresh_now(sources, store, names, max_pages=max_pages)}
 
     return app
 

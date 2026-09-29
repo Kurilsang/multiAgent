@@ -28,7 +28,10 @@ class CatalogAppTest(unittest.TestCase):
 
     def test_refresh_then_search_paginates(self):
         resp = self.client.post("/internal/refresh", json={})
-        self.assertEqual(resp.json()["results"], [{"source": "fake", "status": "ok", "count": 5}])
+        self.assertEqual(
+            resp.json()["results"],
+            [{"source": "fake", "status": "ok", "count": 5, "warnings": []}],
+        )
         self.assertEqual(self.source.crawl_calls, 1)
 
         resp = self.client.get("/internal/search", params={"page": 1, "page_size": 2})
@@ -75,6 +78,19 @@ class CatalogAppTest(unittest.TestCase):
         self.assertIn("平台不可达", state["fake"]["last_error"])
         # 降级读缓存：旧条目仍在
         self.assertEqual(self.client.get("/internal/search").json()["total"], 5)
+
+    def test_refresh_accepts_page_budget_and_reports_truncation(self):
+        self.source.crawl_warnings = ["已截断：仅爬取前 200 页，仍有更多"]
+        resp = self.client.post("/internal/refresh", json={"max_pages": "9"})
+        self.assertEqual(self.source.crawl_max_pages, [9])  # 预算透传（容错字符串）
+        self.assertEqual(
+            resp.json()["results"][0]["warnings"], ["已截断：仅爬取前 200 页，仍有更多"]
+        )
+        state = {
+            item["source"]: item
+            for item in self.client.get("/internal/sources").json()["sources"]
+        }
+        self.assertIn("截断", state["fake"]["warning"])
 
     def test_sources_lists_configured_but_never_refreshed(self):
         resp = self.client.get("/internal/sources")

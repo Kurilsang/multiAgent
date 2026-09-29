@@ -202,6 +202,11 @@
     padding: 8px 4px; border-bottom: 1px solid var(--border);
   }
   .market-row:last-child { border-bottom: none; }
+  .market-warn {
+    color: #e8b339; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .market-warn:empty { display: none; }
   .market-row .skill-name { flex: 0 0 auto; }
   .market-row .skill-desc { flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #confirm-mask {
@@ -301,8 +306,10 @@
           <input id="market-q" placeholder="搜索名称 / 描述…">
           <select id="market-source"><option value="">全部来源</option></select>
           <button id="market-search-btn">搜索</button>
-          <button id="market-refresh-btn" title="立即爬取一次目录">刷新目录</button>
+          <button id="market-refresh-btn" title="立即爬取一次目录（默认页数预算，后台爬取）">刷新目录</button>
+          <button id="market-crawl-all-btn" title="放开页数上限翻到游标耗尽（突破截断，分钟级后台爬取）">全量抓取</button>
         </div>
+        <div class="market-warn" id="market-warnings"></div>
         <div id="market-list"></div>
         <div class="skill-actions">
           <button id="market-prev">上一页</button>
@@ -1170,17 +1177,24 @@ function showKind(kind) {
 }
 
 // 目录刷新：全量爬取分钟级，服务端异步执行——触发后轮询源状态收口
-async function refreshCatalog() {
+// deep = 「全量抓取」：放开页数预算（适配器硬上限封顶），突破默认截断
+const CRAWL_ALL_MAX_PAGES = 2000;
+
+async function refreshCatalog(deep) {
   const btn = document.getElementById('market-refresh-btn');
+  const allBtn = document.getElementById('market-crawl-all-btn');
   if (btn.disabled) return;
   btn.disabled = true;
+  allBtn.disabled = true;
   btn.textContent = '刷新中…';
   try {
-    const body = marketState.source ? { source: marketState.source } : {};
+    const body = {};
+    if (marketState.source) body.source = marketState.source;
+    if (deep) body.max_pages = CRAWL_ALL_MAX_PAGES;
     const data = await postJson('/market/refresh', body);
     toast(data.status === 'running'
-      ? '目录刷新已在进行中…'
-      : '已触发目录刷新（后台爬取，可继续浏览）');
+      ? '目录抓取已在进行中…'
+      : (deep ? '已触发全量抓取（放开页数上限，后台进行）' : '已触发目录刷新（后台爬取，可继续浏览）'));
   } catch (e) {
     toast('刷新触发失败：' + e.message);
     stopRefreshUi();
@@ -1193,6 +1207,7 @@ function stopRefreshUi() {
   const btn = document.getElementById('market-refresh-btn');
   btn.disabled = false;
   btn.textContent = '刷新目录';
+  document.getElementById('market-crawl-all-btn').disabled = false;
 }
 
 function pollRefreshState() {
@@ -1229,7 +1244,7 @@ async function loadMarketSources() {
   marketSourcesLoaded = true;
 }
 
-// 来源下拉渲染（初始与刷新轮询共用）：陈旧/失败状态可见
+// 来源状态渲染（初始与刷新轮询共用）：陈旧/失败/截断告警可见
 function renderSourceOptions(data) {
   const select = document.getElementById('market-source');
   const current = marketState.source;
@@ -1243,10 +1258,20 @@ function renderSourceOptions(data) {
     opt.value = item.source;
     opt.textContent = item.source
       + (item.stale ? '（缓存）' : '')
-      + (item.last_error ? '（上次抓取失败）' : '');
+      + (item.last_error ? '（上次抓取失败）' : '')
+      + (item.warning ? '（告警）' : '');
+    if (item.warning) opt.title = item.warning;
     select.appendChild(opt);
   }
   select.value = current;
+  const box = document.getElementById('market-warnings');
+  box.innerHTML = '';
+  for (const item of data.sources || []) {
+    if (!item.warning) continue;
+    const line = document.createElement('div');
+    line.textContent = item.source + '：' + item.warning;
+    box.appendChild(line);
+  }
 }
 
 async function loadMarketOnline() {
@@ -1603,7 +1628,8 @@ document.getElementById('market-next').addEventListener('click', () => {
   marketState.page += 1;
   loadMarketOnline();
 });
-document.getElementById('market-refresh-btn').addEventListener('click', refreshCatalog);
+document.getElementById('market-refresh-btn').addEventListener('click', () => refreshCatalog(false));
+document.getElementById('market-crawl-all-btn').addEventListener('click', () => refreshCatalog(true));
 document.getElementById('cf-preview-btn').addEventListener('click', toggleCfPreview);
 document.getElementById('cf-cancel').addEventListener('click', () => {
   document.getElementById('confirm-mask').hidden = true;

@@ -237,6 +237,35 @@ def _clean_str(value, limit: int) -> str:
     return " ".join(text.split())[:limit]
 
 
+def explain_error(exc: BaseException) -> str:
+    """把底层异常展平成用户可读原因：展开 anyio 异常组与显式 cause 链，去重。
+
+    SDK 的会话栈（TaskGroup/AsyncExitStack）会把真实原因包进 ExceptionGroup，
+    str() 只剩「unhandled errors in a TaskGroup」套话——错误信息从用户视角写：
+    异常组自身文本一律跳过，只取叶子原因（如 Authentication required / 连接被拒绝）；
+    非组异常保留自身文本，只追显式 raise ... from ... 链（隐式 __context__ 多为背景噪音）。
+    """
+    leaves: list[str] = []
+    seen: set[int] = set()
+
+    def walk(node: BaseException | None) -> None:
+        if node is None or id(node) in seen:
+            return
+        seen.add(id(node))
+        nested = getattr(node, "exceptions", None)
+        if nested:  # 异常组自身文本是套话，只取子异常
+            for sub in nested:
+                walk(sub)
+            return
+        text = str(node).strip() or type(node).__name__
+        if text not in leaves:
+            leaves.append(text)
+        walk(node.__cause__)
+
+    walk(exc)
+    return "；".join(leaves[:3]) or type(exc).__name__
+
+
 def runner_problem(server: McpServer) -> str | None:
     """宿主运行器预检：命令不在 PATH 且非可执行路径 → 中文问题描述。"""
     if server.transport != "stdio":
@@ -340,14 +369,19 @@ class McpManager:
                 f"未解析的占位符：{'、'.join('${' + var + '}' for var in missing)}"
                 f"——请在 .env 或环境变量中配置"
             )
-        session = self._factory(
-            replace(
-                server,
-                env=resolved["env"],
-                url=resolved["url"],
-                headers=resolved["headers"],
+        try:
+            session = self._factory(
+                replace(
+                    server,
+                    env=resolved["env"],
+                    url=resolved["url"],
+                    headers=resolved["headers"],
+                )
             )
-        )
+        except McpError:
+            raise
+        except Exception as exc:  # 注入/SDK 异常组也 fail loud 且可读
+            raise McpError(f"MCP 服务连接失败：{explain_error(exc)}") from exc
         try:
             metas = session.list_tools()
         except Exception as exc:
@@ -355,7 +389,7 @@ class McpManager:
                 session.close()
             except Exception:
                 pass
-            raise McpError(f"连接失败/工具清单拉取失败：{exc}") from exc
+            raise McpError(f"连接失败/工具清单拉取失败：{explain_error(exc)}") from exc
         if server.enabled_tools:
             allowed = set(server.enabled_tools)
             metas = [meta for meta in metas if meta.get("name") in allowed]
@@ -436,7 +470,7 @@ class McpManager:
                 raise
             except Exception as retry_exc:
                 raise McpError(
-                    f"MCP 工具 {full_name} 调用失败（重连后仍失败）：{retry_exc}"
+                    f"MCP 工具 {full_name} 调用失败（重连后仍失败）：{explain_error(retry_exc)}"
                 ) from retry_exc
 
     @staticmethod
@@ -453,12 +487,16 @@ class McpManager:
                 pass
         resolved = self._resolved_servers.get(name)
         if resolved is None:
-            raise McpError(f"MCP 服务 {name!r} 重连失败：连接定义已不存在（原错误：{cause}）")
+            raise McpError(
+                f"MCP 服务 {name!r} 重连失败：连接定义已不存在（原错误：{explain_error(cause)}）"
+            )
         try:
             session = self._factory(resolved)
         except Exception as exc:
-            self._statuses[name] = ("error", f"重连失败：{exc}")
-            raise McpError(f"MCP 服务 {name!r} 重连失败：{exc}（原错误：{cause}）") from exc
+            self._statuses[name] = ("error", f"重连失败：{explain_error(exc)}")
+            raise McpError(
+                f"MCP 服务 {name!r} 重连失败：{explain_error(exc)}（原错误：{explain_error(cause)}）"
+            ) from exc
         self._sessions[name] = session
         for entry in self._entries.values():
             if entry.server.name == name:
@@ -894,7 +932,7 @@ class _SdkSessionBase:
             self._ready.result(timeout=_CONNECT_TIMEOUT)
         except Exception as exc:
             self.close()
-            raise McpError(f"MCP 服务连接失败：{exc}") from exc
+            raise McpError(f"MCP 服务连接失败：{explain_error(exc)}") from exc
 
     async def _lifecycle(self) -> None:
         try:
@@ -1037,4 +1075,4 @@ def sdk_client_factory(server: McpServer) -> McpSession:
     except McpError:
         raise
     except Exception as exc:  # pragma: no cover - 防御：保证错误都译成 McpError
-        raise McpError(f"MCP 服务连接失败：{exc}") from exc
+        raise McpError(f"MCP 服务连接失败：{explain_error(exc)}") from exc

@@ -160,6 +160,31 @@ class NamingTest(unittest.TestCase):
             tool_name("x" * 60, "a_very_long_tool_name")
 
 
+class ExplainErrorTest(unittest.TestCase):
+    """错误穿透：anyio 异常组/cause 链展平到叶子（TaskGroup 套话不进用户视野）。"""
+
+    def test_flattens_taskgroup_and_cause_chain(self):
+        from app.mcp import explain_error
+
+        leaf = OSError("All connection attempts failed")
+        inner = RuntimeError("initialize 失败")
+        inner.__cause__ = leaf
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [inner])
+        text = explain_error(group)
+        self.assertIn("All connection attempts failed", text)
+        self.assertNotIn("TaskGroup", text)
+
+    def test_flattens_and_dedupes_leaf_texts(self):
+        from app.mcp import explain_error
+
+        group = ExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [TimeoutError("timed out"), TimeoutError("timed out")],
+        )
+        self.assertEqual(explain_error(group), "timed out")
+        self.assertEqual(explain_error(ValueError("")), "ValueError")  # 空文本退化为类型名
+
+
 class ManagerConnectTest(unittest.TestCase):
     """运行时装配：tools/list 灌注册表、fail loud、闸门字段（client factory 缝）。"""
 
@@ -218,6 +243,21 @@ class ManagerConnectTest(unittest.TestCase):
         errors = manager.connect()
         self.assertIn("握手超时", errors[0])
         self.assertEqual(manager.build_tools(), [])
+        self.assertEqual(manager.listing()[0]["status"], "error")
+
+    def test_connect_failure_flattens_exception_group(self):
+        """SDK 异常组（unhandled errors in a TaskGroup）不进用户视野：报叶子原因。"""
+
+        def factory(server):
+            raise ExceptionGroup(
+                "unhandled errors in a TaskGroup",
+                [OSError("由于目标计算机积极拒绝，无法连接")],
+            )
+
+        manager = McpManager([self.make_server()], client_factory=factory, environ={})
+        errors = manager.connect()
+        self.assertIn("由于目标计算机积极拒绝", errors[0])
+        self.assertNotIn("TaskGroup", errors[0])
         self.assertEqual(manager.listing()[0]["status"], "error")
 
     def test_duplicate_short_name_rejected(self):

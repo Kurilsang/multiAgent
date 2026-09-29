@@ -306,8 +306,7 @@
           <input id="market-q" placeholder="搜索名称 / 描述…">
           <select id="market-source"><option value="">全部来源</option></select>
           <button id="market-search-btn">搜索</button>
-          <button id="market-refresh-btn" title="立即爬取一次目录（默认页数预算，后台爬取）">刷新目录</button>
-          <button id="market-crawl-all-btn" title="放开页数上限翻到游标耗尽（突破截断，分钟级后台爬取）">全量抓取</button>
+          <button id="market-refresh-btn" title="立即爬取一次目录（翻到见底，后台爬取，可继续浏览）">刷新目录</button>
         </div>
         <div class="market-warn" id="market-warnings"></div>
         <div id="market-list"></div>
@@ -1177,24 +1176,18 @@ function showKind(kind) {
 }
 
 // 目录刷新：全量爬取分钟级，服务端异步执行——触发后轮询源状态收口
-// deep = 「全量抓取」：放开页数预算（适配器硬上限封顶），突破默认截断
-const CRAWL_ALL_MAX_PAGES = 2000;
-
-async function refreshCatalog(deep) {
+async function refreshCatalog() {
   const btn = document.getElementById('market-refresh-btn');
-  const allBtn = document.getElementById('market-crawl-all-btn');
   if (btn.disabled) return;
   btn.disabled = true;
-  allBtn.disabled = true;
   btn.textContent = '刷新中…';
   try {
     const body = {};
     if (marketState.source) body.source = marketState.source;
-    if (deep) body.max_pages = CRAWL_ALL_MAX_PAGES;
     const data = await postJson('/market/refresh', body);
     toast(data.status === 'running'
       ? '目录抓取已在进行中…'
-      : (deep ? '已触发全量抓取（放开页数上限，后台进行）' : '已触发目录刷新（后台爬取，可继续浏览）'));
+      : '已触发目录刷新（翻到见底，后台爬取，可继续浏览）');
   } catch (e) {
     toast('刷新触发失败：' + e.message);
     stopRefreshUi();
@@ -1207,7 +1200,6 @@ function stopRefreshUi() {
   const btn = document.getElementById('market-refresh-btn');
   btn.disabled = false;
   btn.textContent = '刷新目录';
-  document.getElementById('market-crawl-all-btn').disabled = false;
 }
 
 function pollRefreshState() {
@@ -1334,6 +1326,15 @@ function renderMarketRows(data) {
     source.textContent = item.source + ' · ' + (item.installs || 0) + ' 安装'
       + (item.validated && kind !== 'mcp' ? ' · 已验证' : '');
     row.appendChild(source);
+    if (kind === 'mcp') {
+      // 形态徽章：带包坐标 = 本地拉起（npx/uvx），无 = 远端 API
+      const form = document.createElement('span');
+      form.className = 'badge';
+      form.textContent = (item.tags || []).length
+        ? '本地包 · ' + item.tags.join('/')
+        : '远程';
+      row.appendChild(form);
+    }
     if (item.validated && kind === 'mcp') row.appendChild(verifiedBadge());
     if (deprecated) row.appendChild(deprecatedBadge(item));
     if (kind === 'mcp' && (item.tags || []).indexOf('mcpb') >= 0) {
@@ -1628,8 +1629,7 @@ document.getElementById('market-next').addEventListener('click', () => {
   marketState.page += 1;
   loadMarketOnline();
 });
-document.getElementById('market-refresh-btn').addEventListener('click', () => refreshCatalog(false));
-document.getElementById('market-crawl-all-btn').addEventListener('click', () => refreshCatalog(true));
+document.getElementById('market-refresh-btn').addEventListener('click', () => refreshCatalog());
 document.getElementById('cf-preview-btn').addEventListener('click', toggleCfPreview);
 document.getElementById('cf-cancel').addEventListener('click', () => {
   document.getElementById('confirm-mask').hidden = true;

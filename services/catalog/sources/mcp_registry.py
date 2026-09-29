@@ -20,8 +20,7 @@ from ..schema import CatalogDetail, CatalogEntry, CatalogError, CatalogPack
 BASE_URL = "https://registry.modelcontextprotocol.io"
 PAGE_TIMEOUT = 20
 PAGE_SIZE = 100
-DEFAULT_PAGES = 200  # 默认页数预算（约 2 万条）防失控；显式 max_pages 可抓更多
-MAX_PAGES = 2000  # 硬上限（约 20 万条），防游标异常时无限翻页
+MAX_PAGES = 2000  # 页数硬上限（约 20 万条）：默认翻到见底，防游标异常时无限翻页
 USER_AGENT = "multiagent-catalog/1.0 (+https://github.com/Kurilsang/multiAgent)"
 _OFFICIAL_META = "io.modelcontextprotocol.registry/official"
 
@@ -36,20 +35,17 @@ class McpRegistrySource:
         self.crawl_warnings: list[str] = []  # 最近一次 crawl 的非致命告警（如截断）
 
     def crawl(self, max_pages: int = 0) -> list[CatalogEntry]:
-        """全量游标拉取（max_pages=0 = 默认 DEFAULT_PAGES 页预算，显式值可抓更多）。
+        """游标拉取到见底（max_pages 可显式限预算；一律受 MAX_PAGES 硬上限保护）。
 
-        缓存模型是整批替换，必须尽量全量——限页会把未爬到的条目清出目录。
-        页数预算耗尽而游标仍有剩余 → 记截断告警（crawl_warnings），由刷新层
-        落源状态提示用户主动触发全量抓取。
+        缓存模型是整批替换，必须全量——限页会把未爬到的条目清出目录。
+        默认即翻到见底（防失控只留硬上限）；预算耗尽而游标仍有剩余（极端规模）
+        → 记截断告警（crawl_warnings），由刷新层落源状态。
         updated_since 真增量（含 deleted tombstone）待 store 支持合并后启用。
         """
         warnings: list[str] = []
         entries: list[CatalogEntry] = []
         cursor = ""
-        if max_pages and max_pages > 0:
-            limit = min(max_pages, MAX_PAGES)
-        else:
-            limit = DEFAULT_PAGES
+        limit = min(max_pages, MAX_PAGES) if max_pages and max_pages > 0 else MAX_PAGES
         for _ in range(limit):
             url = f"{BASE_URL}/v0.1/servers?limit={PAGE_SIZE}&version=latest"
             if cursor:
@@ -62,10 +58,10 @@ class McpRegistrySource:
             cursor = str((data.get("metadata") or {}).get("nextCursor") or "")
             if not cursor:
                 break
-        if cursor:  # 预算耗尽仍未见底：缓存不完整，告警可见
+        if cursor:  # 见到硬上限仍未见底：缓存不完整，告警可见
             warnings.append(
-                f"已截断：仅爬取前 {limit} 页（{len(entries)} 条），仍有更多"
-                f"——可触发「全量抓取」补齐"
+                f"已截断：已达页数预算上限（{limit} 页 / {len(entries)} 条），仍有更多"
+                f"——目录不完整，需提高预算上限或等增量同步"
             )
         self.crawl_warnings = warnings  # 整体赋值：并发爬取下不叠加
         if not entries:

@@ -31,7 +31,7 @@ GET  /internal/sources        各源状态（last_refresh / entry_count / last_e
 GET  /internal/search         ?q=&source=&kind=&page=&page_size= 统一条目分页（读缓存；条目含 kind：skill|mcp，kind= 按资产类型过滤）
 GET  /internal/detail         ?id=&source= 确认卡预览（manifest_path/manifest_text + 审计明细）
 GET  /internal/pack/{ref}     ?source= 目录包：manifest 文件集（manifest_path 指定 manifest 文件）+ 附带文件清单
-POST /internal/refresh        {"source"?: "...", "max_pages"?: N} 一次爬取（逐源降级；max_pages=页数预算，0=适配器默认上限；截断等非致命告警随结果与源状态可见）
+POST /internal/refresh        {"source"?: "...", "max_pages"?: N} 一次爬取（逐源降级；默认翻到游标耗尽，max_pages 显式限预算，一律受硬上限保护；截断等非致命告警随结果与源状态可见）
 ```
 
 ## 目录

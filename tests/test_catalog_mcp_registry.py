@@ -71,6 +71,19 @@ class McpRegistrySourceTest(unittest.TestCase):
             any("cursor=page2cursor" in url for _m, url, _k in self.client.calls)
         )
 
+    def test_default_crawl_goes_to_bottom_up_to_hard_cap(self):
+        """默认翻到见底（用户决策 2026-09-29）：仅受硬上限保护，见顶才截断告警。"""
+        import services.catalog.sources.mcp_registry as registry
+
+        original = registry.MAX_PAGES
+        registry.MAX_PAGES = 1  # 模拟极端规模：硬上限 1 页
+        try:
+            source = self.make_source()
+            source.crawl()  # 不传预算：默认即翻到硬上限
+        finally:
+            registry.MAX_PAGES = original
+        self.assertTrue(any("截断" in item for item in source.crawl_warnings))
+
     def test_detail_returns_manifest_with_declarations(self):
         detail = self.make_source().detail("io.github.acme/filesystem")
         self.assertEqual(detail.manifest_path, "server.json")

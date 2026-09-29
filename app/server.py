@@ -167,7 +167,7 @@ _DOTENV_PATH = PROJECT_ROOT / ".env"
 
 app = FastAPI(
     title="multiagent",
-    description="内部网关场景 Agent —— 第五步进行中：MCP 市场（第三、四步技能市场 + 在线目录已落地）",
+    description="内部网关场景 Agent —— 第五步 MCP 市场已落地（含动态 OAuth 授权流；第三、四步技能市场 + 在线目录为其底座）",
 )
 
 

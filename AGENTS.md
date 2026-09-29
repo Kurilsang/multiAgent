@@ -37,7 +37,7 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 - `services/catalog/` — 技能在线目录爬取服务（独立进程，独立 requirements）：**外网元数据交互唯一集中点（隔离区）**，零密钥、零技能包写权限，`/internal/*` 仅对内网；独立部署升级 = 本包原样搬出 + 主服务改 `CATALOG_BASE_URL`（详见其 README）；主服务自身不外网抓目录，MCP 运行时可按用户显式配置直连远程端点（SPEC-0003 网络边界决策）
 - `app/static/index.html` — 无框架单文件 WebUI（聊天流式 + 任务时间线 + `/` 技能弹层 + 统一市场视图：技能 / MCP 双类资产、已安装/在线浏览双子面板 + 单次确认卡）
 - `tests/fakes.py` — 预约定测试缝隙：脚本化 LLM fake + MCP 会话 fake（client factory 注入）+ MCP OAuth fake（授权协作对象/HTTP 注入）+ 目录源/HTTP fake；测试不发真实请求（git 安装测试用本地仓库离线克隆）
-- 约定：新增厂商只改 `config.py` 的 `PROVIDERS` + `.env`；错误信息从用户视角写；配置类改动要同步 `.env.example` 和 README；技能包只写 SKILL.md 纯提示词（frontmatter 仅 name/description/tools，不携带可执行脚本）；**外网抓取只允许发生在 `services/catalog/`**，主服务不直接外网抓取（MCP 运行时按用户显式配置直连除外）
+- 约定：新增厂商只改 `config.py` 的 `PROVIDERS` + `.env`；错误信息从用户视角写；配置类改动要同步 `.env.example` 和 README；技能包只写 SKILL.md 纯提示词（frontmatter 仅 name/description/tools，不携带可执行脚本）；**外网抓取只允许发生在 `services/catalog/`**，主服务不直接外网抓取（MCP 运行时按用户显式配置直连除外，含 OAuth 授权端点）
 
 ## 当前状态与下一步
 

@@ -1,6 +1,6 @@
 # multiagent
 
-针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡）。
+针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡 + 动态 OAuth 授权流）。
 
 ## 特性
 
@@ -240,7 +240,6 @@ python -m unittest discover tests -v
 ## 后续规划
 
 - 多 Agent 协作（评审者/执行者分工，复用状态机引擎）
-- 动态 OAuth 授权流（#44：授权码 + PKCE + 设备码 + token 存储/刷新）
 - MCP 市场后续扩展：mcpb 单文件包下载安装、ClawHub 适配器、已验证源免确认白名单；`/` 技能弹层混入在线目录
 - 技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub API）、zip 上传、版本与更新检查
 - 多会话管理与持久化

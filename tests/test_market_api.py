@@ -1,6 +1,8 @@
 """主服务在线目录代理与目录包安装测试：fake 爬取服务注入，目录安装路径零意外外网。"""
 
 import tempfile
+import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -104,13 +106,12 @@ class MarketApiTest(unittest.TestCase):
             }
         )
         server._catalog_client = lambda: fake
-        self.assertEqual(self.client.get("/market/sources").json(), {"sources": []})
+        self.assertEqual(self.client.get("/market/sources").json(), {"sources": [], "refreshing": False})
         self.assertEqual(self.client.get("/market/search", params={"q": "pdf"}).json()["total"], 1)
         self.assertEqual(
             self.client.get("/market/detail", params={"id": "a", "source": "s"}).json(),
             {"manifest_text": "x"},
         )
-        self.assertEqual(self.client.post("/market/refresh", json={}).json(), {"results": []})
 
     def test_market_search_forwards_kind_filter(self):
         """统一市场按资产类型分栏检索：kind 参数原样转发爬取服务。"""
@@ -265,6 +266,90 @@ class CatalogAutostartTest(unittest.TestCase):
                 unittest.mock.patch.object(server, "_catalog_reachable", return_value=False), \
                 unittest.mock.patch.object(server.subprocess, "Popen", side_effect=OSError("no")):
             server._ensure_catalog_service()  # 不抛异常：走 /market/* 中文降级
+
+
+class MarketRefreshTest(unittest.TestCase):
+    """目录刷新异步化：全量爬取分钟级，触发即返回；结果落源状态。
+
+    曾经的坑：同步刷新超出代理 15s 超时即 502（mcp-registry 全量实测 200s+）。
+    """
+
+    def setUp(self):
+        self._orig = (server.settings, server._catalog_client)
+        server.settings = StubSettings()
+        server._set_refresh_running(False)
+        self._release = threading.Event()
+        self._started = threading.Event()
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        self._release.set()  # 放行可能阻塞的后台线程，避免测试悬挂
+        for _ in range(200):
+            if not server._refresh_running:
+                break
+            time.sleep(0.01)
+        (server.settings, server._catalog_client) = self._orig
+
+    def _blocking_http(self):
+        test = self
+
+        class BlockingHttp:
+            def __init__(self):
+                self.calls: list[tuple] = []
+
+            def request(self, method, path, **kwargs):
+                self.calls.append((method, path, kwargs))
+                if "/internal/refresh" in path:  # 只堵爬取，源状态查询立回
+                    test._started.set()
+                    test._release.wait(5)
+                    return FakeCatalogResponse({"results": []})
+                return FakeCatalogResponse({"sources": []})
+
+        return BlockingHttp()
+
+    def _wait_idle(self):
+        for _ in range(200):
+            if not server._refresh_running:
+                return
+            time.sleep(0.01)
+
+    def test_refresh_triggers_background_crawl_with_long_timeout(self):
+        fake = self._blocking_http()
+        server._catalog_client = lambda: fake
+        resp = self.client.post("/market/refresh", json={})
+        self.assertEqual(resp.json(), {"status": "started"})
+        self.assertTrue(self._started.wait(2))
+        self._release.set()
+        self._wait_idle()
+        method, path, kwargs = fake.calls[0]
+        self.assertEqual((method, path), ("POST", "/internal/refresh"))
+        self.assertGreaterEqual(kwargs.get("timeout", 0), 60)  # 不再被 15s 代理超时腰斩
+
+    def test_refresh_dedupes_while_running(self):
+        fake = self._blocking_http()
+        server._catalog_client = lambda: fake
+        self.assertEqual(self.client.post("/market/refresh", json={}).json(), {"status": "started"})
+        self.assertTrue(self._started.wait(2))
+        self.assertEqual(self.client.post("/market/refresh", json={}).json(), {"status": "running"})
+        self._release.set()
+        self._wait_idle()
+        self.assertEqual(len(fake.calls), 1)  # 进行中不重复触发
+
+    def test_sources_carries_refreshing_flag(self):
+        fake = self._blocking_http()
+        server._catalog_client = lambda: fake
+        self.client.post("/market/refresh", json={})
+        self.assertTrue(self._started.wait(2))
+        self.assertTrue(self.client.get("/market/sources").json()["refreshing"])
+        self._release.set()
+        self._wait_idle()
+        self.assertFalse(self.client.get("/market/sources").json()["refreshing"])
+
+    def test_refresh_disabled_when_base_url_empty(self):
+        server.settings.catalog_base_url = ""
+        resp = self.client.post("/market/refresh", json={})
+        self.assertEqual(resp.status_code, 503)
+        self.assertIn("未启用", resp.json()["detail"])
 
 
 if __name__ == "__main__":

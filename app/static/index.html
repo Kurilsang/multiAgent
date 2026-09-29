@@ -1169,21 +1169,84 @@ function showKind(kind) {
   if (document.getElementById('online-panel').style.display !== 'none') loadMarketOnline();
 }
 
+// 目录刷新：全量爬取分钟级，服务端异步执行——触发后轮询源状态收口
+async function refreshCatalog() {
+  const btn = document.getElementById('market-refresh-btn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = '刷新中…';
+  try {
+    const body = marketState.source ? { source: marketState.source } : {};
+    const data = await postJson('/market/refresh', body);
+    toast(data.status === 'running'
+      ? '目录刷新已在进行中…'
+      : '已触发目录刷新（后台爬取，可继续浏览）');
+  } catch (e) {
+    toast('刷新触发失败：' + e.message);
+    stopRefreshUi();
+    return;
+  }
+  pollRefreshState();
+}
+
+function stopRefreshUi() {
+  const btn = document.getElementById('market-refresh-btn');
+  btn.disabled = false;
+  btn.textContent = '刷新目录';
+}
+
+function pollRefreshState() {
+  const timer = setInterval(async () => {
+    let data;
+    try {
+      const res = await fetch('/market/sources');
+      data = await res.json();
+    } catch (e) { return; } // 网络抖动：下个周期再试
+    renderSourceOptions(data);
+    if (data.refreshing) return;
+    clearInterval(timer);
+    stopRefreshUi();
+    marketState.page = 1;
+    await loadMarketOnline();
+    toast(refreshSummary(data));
+  }, 5000);
+}
+
+function refreshSummary(data) {
+  const parts = (data.sources || []).map((item) => item.source + ' ' + (item.entry_count || 0) + ' 条'
+    + (item.last_error ? '（抓取失败: ' + String(item.last_error).slice(0, 40) + '）' : ''));
+  return '刷新结束：' + (parts.join('；') || '（无源状态）');
+}
+
 async function loadMarketSources() {
   if (marketSourcesLoaded) return;
   try {
     const res = await fetch('/market/sources');
     if (!res.ok) return;
     const data = await res.json();
-    const select = document.getElementById('market-source');
-    for (const item of data.sources || []) {
-      const opt = document.createElement('option');
-      opt.value = item.source;
-      opt.textContent = item.source + (item.stale ? '（缓存）' : '');
-      select.appendChild(opt);
-    }
+    renderSourceOptions(data);
   } catch (e) { /* 静默 */ }
   marketSourcesLoaded = true;
+}
+
+// 来源下拉渲染（初始与刷新轮询共用）：陈旧/失败状态可见
+function renderSourceOptions(data) {
+  const select = document.getElementById('market-source');
+  const current = marketState.source;
+  select.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = '全部来源';
+  select.appendChild(all);
+  for (const item of data.sources || []) {
+    const opt = document.createElement('option');
+    opt.value = item.source;
+    opt.textContent = item.source
+      + (item.stale ? '（缓存）' : '')
+      + (item.last_error ? '（上次抓取失败）' : '');
+    select.appendChild(opt);
+  }
+  select.value = current;
 }
 
 async function loadMarketOnline() {
@@ -1540,15 +1603,7 @@ document.getElementById('market-next').addEventListener('click', () => {
   marketState.page += 1;
   loadMarketOnline();
 });
-document.getElementById('market-refresh-btn').addEventListener('click', async () => {
-  try {
-    await fetch('/market/refresh', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-    });
-  } catch (e) { /* loadMarketOnline 会给出不可用提示 */ }
-  marketState.page = 1;
-  loadMarketOnline();
-});
+document.getElementById('market-refresh-btn').addEventListener('click', refreshCatalog);
 document.getElementById('cf-preview-btn').addEventListener('click', toggleCfPreview);
 document.getElementById('cf-cancel').addEventListener('click', () => {
   document.getElementById('confirm-mask').hidden = true;

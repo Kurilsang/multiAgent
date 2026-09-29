@@ -107,8 +107,10 @@ curl -X POST http://127.0.0.1:8000/skills/install \
 
 # 在线目录（爬取服务代理；CATALOG_BASE_URL 未配置时返回 503）
 curl "http://127.0.0.1:8000/market/search?q=pdf&kind=skill&page=1&page_size=10"   # kind=skill|mcp 按资产类型过滤
-curl http://127.0.0.1:8000/market/sources
+curl http://127.0.0.1:8000/market/sources    # 源状态 + refreshing（后台爬取进行中标志）
 curl "http://127.0.0.1:8000/market/detail?id=owner/repo/skill&source=skills-sh"
+# 异步触发一次目录爬取（立即返回 {"status": "started"|"running"}，重复触发去重；
+# 全量爬取分钟级，结果逐源降级落源状态，经 /market/sources 查询）
 curl -X POST http://127.0.0.1:8000/market/refresh -H "Content-Type: application/json" -d '{}'
 
 # MCP 管理（连接定义 = mcp/servers.json，改动可经重载生效；工具即装即用）

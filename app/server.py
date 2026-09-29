@@ -29,7 +29,7 @@
     GET  /market/sources  在线目录各源状态（爬取服务代理）
     GET  /market/search   在线目录搜索 ?q=&source=&kind=&page=&page_size=
     GET  /market/detail   在线目录详情 ?id=&source=（SKILL.md 预览 + 审计徽标）
-    POST /market/refresh  触发一次目录爬取 {"source"?: "..."}
+    POST /market/refresh  异步触发目录爬取 {"source"?: "..."}（立即返回，结果经 /market/sources）
     GET  /export          导出主对话历史，?format=markdown(默认)|json
     POST /reset           清空对话上下文
 """
@@ -739,7 +739,7 @@ class _UrllibCatalogClient:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
 
-    def request(self, method, path, params=None, json=None, **_):
+    def request(self, method, path, params=None, json=None, timeout=None, **_):
         url = self._base + path
         if params:
             kept = {k: v for k, v in params.items() if v not in (None, "")}
@@ -753,7 +753,9 @@ class _UrllibCatalogClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=timeout or self._timeout
+            ) as response:
                 return _CatalogResponse(
                     response.status, _load_json(response.read().decode("utf-8", "replace"))
                 )
@@ -808,13 +810,15 @@ def _ensure_catalog_service() -> None:
     atexit.register(proc.terminate)
 
 
-def _market_proxy(method: str, path: str, **kwargs) -> dict:
+def _market_proxy(
+    method: str, path: str, *, timeout: float | None = None, **kwargs
+) -> dict:
     if not settings.catalog_base_url.strip():
         raise HTTPException(
             status_code=503, detail="在线目录未启用（未配置 CATALOG_BASE_URL）"
         )
     try:
-        response = _catalog_client().request(method, path, **kwargs)
+        response = _catalog_client().request(method, path, timeout=timeout, **kwargs)
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -833,7 +837,10 @@ def _market_proxy(method: str, path: str, **kwargs) -> dict:
 
 @app.get("/market/sources")
 def market_sources() -> dict:
-    return _market_proxy("GET", "/internal/sources")
+    payload = _market_proxy("GET", "/internal/sources")
+    with _refresh_lock:
+        payload["refreshing"] = _refresh_running
+    return payload
 
 
 @app.get("/market/search")
@@ -858,9 +865,54 @@ def market_detail(id: str, source: str) -> dict:
     return _market_proxy("GET", "/internal/detail", params={"id": id, "source": source})
 
 
+# ---- 目录刷新：全量爬取（mcp-registry 单源实测数分钟），异步触发 ----
+
+_REFRESH_TIMEOUT = 600.0
+_refresh_lock = threading.Lock()
+_refresh_running = False
+
+
+def _set_refresh_running(value: bool) -> None:
+    global _refresh_running
+    with _refresh_lock:
+        _refresh_running = value
+
+
+def _run_market_refresh(payload: dict) -> None:
+    """后台执行一次目录爬取；结果落爬取服务源状态（/market/sources 反映）。"""
+    try:
+        _market_proxy("POST", "/internal/refresh", json=payload, timeout=_REFRESH_TIMEOUT)
+    except HTTPException as exc:
+        print(f"[market] 目录刷新失败：{exc.detail}", file=sys.stderr)
+    except Exception as exc:  # 后台线程兜底：不让异常掀翻进程
+        print(f"[market] 目录刷新失败：{exc}", file=sys.stderr)
+    finally:
+        _set_refresh_running(False)
+
+
 @app.post("/market/refresh")
 def market_refresh(payload: dict | None = None) -> dict:
-    return _market_proxy("POST", "/internal/refresh", json=payload or {})
+    """触发一次目录爬取（异步）：立即返回，重复触发去重。
+
+    全量爬取分钟级，同步等待会打爆代理超时（实测 15s 即断）；
+    结果逐源降级落源状态，经 GET /market/sources 查询。
+    """
+    global _refresh_running
+    if not settings.catalog_base_url.strip():
+        raise HTTPException(
+            status_code=503, detail="在线目录未启用（未配置 CATALOG_BASE_URL）"
+        )
+    with _refresh_lock:
+        if _refresh_running:
+            return {"status": "running"}
+        _refresh_running = True
+    threading.Thread(
+        target=_run_market_refresh,
+        args=(payload or {},),
+        daemon=True,
+        name="market-refresh",
+    ).start()
+    return {"status": "started"}
 
 
 def _install_from_catalog(req: InstallRequest) -> dict:

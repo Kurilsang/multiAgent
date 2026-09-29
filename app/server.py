@@ -39,6 +39,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -868,6 +869,8 @@ def market_detail(id: str, source: str) -> dict:
 # ---- 目录刷新：全量爬取（mcp-registry 单源实测数分钟），异步触发 ----
 
 _REFRESH_TIMEOUT = 600.0
+_REFRESH_QUEUE_SECONDS = 1800.0  # 上游已有爬取时的排队上限
+_REFRESH_RETRY_SECONDS = 5.0  # 排队重试间隔（测试可注入缩短）
 _refresh_lock = threading.Lock()
 _refresh_running = False
 
@@ -879,9 +882,28 @@ def _set_refresh_running(value: bool) -> None:
 
 
 def _run_market_refresh(payload: dict) -> None:
-    """后台执行一次目录爬取；结果落爬取服务源状态（/market/sources 反映）。"""
+    """后台执行一次目录爬取；结果落爬取服务源状态（/market/sources 反映）。
+
+    爬取服务同进程爬取互斥：上游已有爬取时本次触发排队重试（refreshing 标志
+    在排队期间保持，UI 不会误报「刷新结束」），排队超上限才放弃并记日志。
+    """
     try:
-        _market_proxy("POST", "/internal/refresh", json=payload, timeout=_REFRESH_TIMEOUT)
+        deadline = time.time() + _REFRESH_QUEUE_SECONDS
+        while True:
+            result = _market_proxy(
+                "POST", "/internal/refresh", json=payload, timeout=_REFRESH_TIMEOUT
+            )
+            busy = [
+                item
+                for item in (result.get("results") or [])
+                if item.get("status") == "refreshing"
+            ]
+            if not busy:  # 已执行：结果逐源降级落源状态
+                return
+            if time.time() >= deadline:
+                print("[market] 目录刷新排队超时：上游已有爬取进行中", file=sys.stderr)
+                return
+            time.sleep(_REFRESH_RETRY_SECONDS)
     except HTTPException as exc:
         print(f"[market] 目录刷新失败：{exc.detail}", file=sys.stderr)
     except Exception as exc:  # 后台线程兜底：不让异常掀翻进程

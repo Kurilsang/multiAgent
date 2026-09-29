@@ -346,6 +346,32 @@ class MarketRefreshTest(unittest.TestCase):
         self._wait_idle()
         self.assertFalse(self.client.get("/market/sources").json()["refreshing"])
 
+    def test_refresh_queues_when_upstream_busy(self):
+        """上游已有爬取（爬取服务同进程互斥）时本次触发排队重试，refreshing 标志保持。"""
+        responses = [
+            FakeCatalogResponse({"results": [{"source": "*", "status": "refreshing"}]}),
+            FakeCatalogResponse({"results": [{"source": "a", "status": "ok", "count": 1, "warnings": []}]}),
+        ]
+        calls: list[str] = []
+
+        class QueueHttp:
+            def request(self, method, path, **kwargs):
+                calls.append(path)
+                return responses.pop(0)
+
+        retry = server._REFRESH_RETRY_SECONDS
+        server._REFRESH_RETRY_SECONDS = 0.01
+        server._catalog_client = lambda: QueueHttp()
+        try:
+            self.assertEqual(
+                self.client.post("/market/refresh", json={}).json(), {"status": "started"}
+            )
+            self._wait_idle()
+        finally:
+            server._REFRESH_RETRY_SECONDS = retry
+        self.assertEqual(calls, ["/internal/refresh", "/internal/refresh"])  # 排队后执行
+        self.assertFalse(server._refresh_running)
+
     def test_refresh_disabled_when_base_url_empty(self):
         server.settings.catalog_base_url = ""
         resp = self.client.post("/market/refresh", json={})

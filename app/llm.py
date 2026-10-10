@@ -6,6 +6,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from threading import Lock
 
 from openai import OpenAI
 
@@ -70,18 +71,21 @@ class LLMClient:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._clients: dict[str, OpenAI] = {}
+        # 多 Agent 并行派发会并发取 client，缓存加锁保证线程安全
+        self._clients_lock = Lock()
 
     def _client_for(self, target: ResolvedTarget) -> OpenAI:
-        client = self._clients.get(target.provider)
-        if client is None:
-            client = OpenAI(
-                api_key=target.api_key,
-                base_url=target.base_url,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-                max_retries=2,
-            )
-            self._clients[target.provider] = client
-        return client
+        with self._clients_lock:
+            client = self._clients.get(target.provider)
+            if client is None:
+                client = OpenAI(
+                    api_key=target.api_key,
+                    base_url=target.base_url,
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                    max_retries=2,
+                )
+                self._clients[target.provider] = client
+            return client
 
     def chat(
         self,

@@ -1,6 +1,6 @@
 # multiagent
 
-内部网关场景的多厂商 LLM 对话服务。当前演进到第五步:MCP 市场与 MCP 工具接入(已落地,SPEC-0003;前四步三厂商对话、ReAct 循环、技能市场、技能在线目录已落地)。
+内部网关场景的多厂商 LLM 对话服务。当前演进到第六步:多 Agent 协作(已落地,SPEC-0004;前五步三厂商对话、ReAct 循环、技能市场、技能在线目录、MCP 市场已落地)。
 
 ## Language
 
@@ -24,6 +24,13 @@ _Avoid_: 历史记录、缓存
 **行动(ACTING)**:
 引擎实际执行模型所选工具的状态。
 
+**派发(DISPATCHING)**:
+编排器把子任务交给子 agent 执行的状态(`dispatch_task` 特殊工具触发);随后进入 WAITING 收集子任务结果。
+_Avoid_: 调用子函数
+
+**等待(WAITING)**:
+子任务收集中:并行子 agent 的事件实时透传,结果合成一条观察值回灌编排器轨迹。
+
 **观察(OBSERVING)**:
 工具执行结果(观察值)被回灌为模型输入的状态。
 
@@ -37,7 +44,45 @@ _Avoid_: 历史记录、缓存
 FINISHED(任务结束,完成度分 completed / partial)与 FAILED(任务失败,如死循环止损、模型响应无法解析)。
 
 **部分完成(partial)**:
-预算耗尽时未达目标但已有进展的终态,向用户返回轨迹摘要。
+未达目标但已有进展的终态:预算耗尽、被用户叫停、或有子任务未达成;向用户返回轨迹摘要(编排任务附子任务状态清单)。
+
+### 多 Agent 编排
+
+**编排任务(Orchestrated Task)**:
+经编排器拆解为子任务执行的任务;不派发子任务时即退化为单 Agent 任务,一套引擎一套入口。
+_Avoid_: 工作流、流水线
+
+**编排器(Orchestrator)**:
+编排任务的主 agent:一条 ReAct 轨迹,经 `dispatch_task` 特殊工具派发子任务并汇总;事件身份 agent_id=main。
+_Avoid_: 主控、调度器
+
+**子任务(Subtask)**:
+`dispatch_task` 派发的一个自包含任务书(写清背景、目标与验收要求);子 agent 看不到编排器上下文。
+_Avoid_: 分片、工作项
+
+**子 agent(Sub-agent)**:
+执行一个子任务的引擎运行(动态装配:persona / 工具子集 / 预激活技能 / 可选模型);深度限一层,不能再派发。
+_Avoid_: 从 agent、工人
+
+**审查 agent(critic)**:
+编排器交付前的收尾审查者:输入任务与最终答案,产出 pass / revise + 意见;revise 触发一次整体回炉(封顶一次)。
+_Avoid_: 质检员、第二个主 agent
+
+**派发闸门(Dispatch Gate)**:
+编排层的预算闸门(非终止层,见 ADR-0003):子任务总数上限 `AGENT_MAX_SUBTASKS`(跨批累计含回炉)、并行度 `AGENT_MAX_PARALLEL`、回炉封顶 `REWORK_LIMIT`;ADR-0002 双层终止仍在每个 agent 内独立生效。
+_Avoid_: 终止层、预算
+
+**回炉(Rework)**:
+critic 判 revise 后把审查意见并入任务描述整体重跑一次;二次仍不过则按现状交付并附审查意见。
+_Avoid_: 重试(易与工具重试混淆)
+
+**叫停(Stop)**:
+用户随时终止整个编排任务(含在跑子 agent):`POST /agent/stop` 或 CLI Ctrl+C 置取消标志,agent 在迭代边界退出,以 partial 收尾并展示已有进展。
+_Avoid_: 取消会话
+
+**审计日志(Audit Log)**:
+每任务一份 JSONL 留痕(`logs/tasks/*.jsonl`),含全部 agent 事件与终态,失败/中断/叫停同样留痕;只可回看,不提供恢复。
+_Avoid_: 运行日志、备份
 
 ### 能力
 

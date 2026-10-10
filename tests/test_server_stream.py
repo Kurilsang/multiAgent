@@ -15,11 +15,13 @@ import app.server as server
 from app.agent import (
     ActionObserved,
     ActionStarted,
+    CancelToken,
     TaskFailed,
     TaskFinished,
     TaskStarted,
     ThoughtDelta,
 )
+from app.audit import TaskAuditLog, read_task_logs
 from app.llm import LLMError, ReasoningDelta, TextDelta
 
 from tests.fakes import FakeLLMClient, text_round, tool_round
@@ -54,6 +56,9 @@ class StubSettings:
     llm_provider = "glm"
     llm_model = ""
     agent_max_iterations = 8
+    agent_max_subtasks = 6
+    agent_max_parallel = 3
+    agent_critic_enabled = False  # 测试缺省关 critic（产品缺省 true，见 test_config）
     skills_catalog_max = 30
     chat_max_tool_turns = 4
     catalog_base_url = "http://catalog.test"
@@ -71,7 +76,7 @@ class FakeAgentEngine:
         self.events = events
         self.calls = []
 
-    def run(self, task, provider=None, model=None, activated=()):
+    def run(self, task, provider=None, model=None, activated=(), **kwargs):
         self.calls.append((task, provider, model, activated))
         yield from self.events
 
@@ -153,6 +158,9 @@ class AgentStreamTest(unittest.TestCase):
     def setUp(self):
         self._orig_engine = server.agent_engine
         self._orig_settings = server.settings
+        self._orig_audit_dir = server.audit_log_dir
+        self._audit_tmp = tempfile.TemporaryDirectory()
+        server.audit_log_dir = Path(self._audit_tmp.name)
         server.settings = StubSettings()
         server.conversation.reset()
         self.client = TestClient(server.app)
@@ -161,6 +169,8 @@ class AgentStreamTest(unittest.TestCase):
         server.conversation.reset()
         server.agent_engine = self._orig_engine
         server.settings = self._orig_settings
+        server.audit_log_dir = self._orig_audit_dir
+        self._audit_tmp.cleanup()
 
     def _parse_frames(self, response) -> list[dict]:
         frames = []
@@ -230,6 +240,120 @@ class AgentStreamTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
 
 
+class MultiAgentFrameTest(unittest.TestCase):
+    """多 Agent 帧：子 agent 事件附身份字段，根 agent 帧保持向后兼容。"""
+
+    def setUp(self):
+        self._orig_engine = server.agent_engine
+        self._orig_settings = server.settings
+        self._orig_audit_dir = server.audit_log_dir
+        self._audit_tmp = tempfile.TemporaryDirectory()
+        server.audit_log_dir = Path(self._audit_tmp.name)
+        server.settings = StubSettings()
+        server.conversation.reset()
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.conversation.reset()
+        server.agent_engine = self._orig_engine
+        server.settings = self._orig_settings
+        server.audit_log_dir = self._orig_audit_dir
+        self._audit_tmp.cleanup()
+
+    def _parse_frames(self, response) -> list[dict]:
+        frames = []
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                frames.append(json.loads(line[len("data: ") :]))
+        return frames
+
+    def test_subagent_frames_carry_identity_and_root_frames_do_not(self):
+        server.agent_engine = FakeAgentEngine(
+            [
+                TaskStarted(task="主任务"),
+                TaskStarted(
+                    task="子任务",
+                    agent_id="sub-1",
+                    agent_name="子任务1",
+                    role="worker",
+                    parent_id="main",
+                ),
+                ThoughtDelta(
+                    text="子思考",
+                    agent_id="sub-1",
+                    agent_name="子任务1",
+                    role="worker",
+                    parent_id="main",
+                ),
+                TaskFinished(
+                    status="completed",
+                    answer="子结果",
+                    iterations=1,
+                    agent_id="sub-1",
+                    agent_name="子任务1",
+                    role="worker",
+                    parent_id="main",
+                ),
+                TaskFinished(status="completed", answer="总答案", iterations=1),
+            ]
+        )
+        with self.client.stream(
+            "POST", "/agent/stream", json={"task": "主任务"}
+        ) as resp:
+            frames = self._parse_frames(resp)
+        self.assertEqual(frames[0], {"type": "task_started"})
+        self.assertEqual(frames[1]["type"], "task_started")
+        self.assertEqual(frames[1]["agent_id"], "sub-1")
+        self.assertEqual(frames[1]["agent_name"], "子任务1")
+        self.assertEqual(frames[1]["role"], "worker")
+        self.assertEqual(frames[1]["parent_id"], "main")
+        self.assertEqual(frames[4]["type"], "final")
+        self.assertNotIn("agent_id", frames[4])
+        # 回写以编排器终态为准（子 agent 的 final 不回写）
+        self.assertEqual(len(server.conversation), 2)
+        self.assertEqual(server.conversation.messages_for_api()[1]["content"], "总答案")
+
+    def test_events_recorded_to_audit_log(self):
+        server.agent_engine = FakeAgentEngine(
+            [TaskStarted(task="任务X"), TaskFinished(status="completed", answer="ok", iterations=1)]
+        )
+        with self.client.stream(
+            "POST", "/agent/stream", json={"task": "任务X"}
+        ) as resp:
+            self._parse_frames(resp)
+        logs = read_task_logs(server.audit_log_dir)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["task"], "任务X")
+        self.assertEqual(len(logs[0]["events"]), 2)
+
+
+class AgentStopTest(unittest.TestCase):
+    """/agent/stop：置当前任务取消标志（单会话单任务语义）。"""
+
+    def setUp(self):
+        self._orig_settings = server.settings
+        server.settings = StubSettings()
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.settings = self._orig_settings
+
+    def test_stop_without_running_task_reports_idle(self):
+        resp = self.client.post("/agent/stop")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "idle", "stopped": False})
+
+    def test_stop_cancels_registered_token(self):
+        cancel = CancelToken()
+        server._register_cancel(cancel)
+        try:
+            resp = self.client.post("/agent/stop")
+            self.assertEqual(resp.json(), {"status": "ok", "stopped": True})
+            self.assertTrue(cancel.cancelled)
+        finally:
+            server._unregister_cancel(cancel)
+
+
 class WiringSwapMixin:
     """把整套技能装配换到临时目录（测试间互不污染，可安全热重载）。"""
 
@@ -242,10 +366,12 @@ class WiringSwapMixin:
             server.skill_load_errors,
             server.agent_engine,
             server.mcp_manager,
+            server.audit_log_dir,
         )
         server.settings = StubSettings()
         server.conversation.reset()
         self._tmp = tempfile.TemporaryDirectory()
+        server.audit_log_dir = Path(self._tmp.name)
         server.llm = FakeLLMClient([])
         (
             server.tool_registry,
@@ -266,6 +392,7 @@ class WiringSwapMixin:
             server.skill_load_errors,
             server.agent_engine,
             server.mcp_manager,
+            server.audit_log_dir,
         ) = self._orig
         self._tmp.cleanup()
 
@@ -413,6 +540,60 @@ class ExportEndpointTest(unittest.TestCase):
         resp = self.client.get("/export?format=xml")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("不支持的导出格式", resp.json()["detail"])
+
+
+class ExportTracesTest(unittest.TestCase):
+    """导出「含任务轨迹」显式选项：默认只导主对话不变。"""
+
+    def setUp(self):
+        self._orig_settings = server.settings
+        self._orig_audit_dir = server.audit_log_dir
+        self._tmp = tempfile.TemporaryDirectory()
+        server.settings = StubSettings()
+        server.audit_log_dir = Path(self._tmp.name)
+        server.conversation.reset()
+        server.conversation.add("user", "问题")
+        server.conversation.add("assistant", "回答")
+        audit = TaskAuditLog("任务X", directory=server.audit_log_dir)
+        audit.record(
+            TaskStarted(task="任务X", agent_id="main", agent_name="编排器", role="orchestrator")
+        )
+        audit.record(
+            TaskFinished(
+                status="completed",
+                answer="ok",
+                iterations=1,
+                agent_id="sub-1",
+                agent_name="子任务1",
+                role="worker",
+                parent_id="main",
+            )
+        )
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.conversation.reset()
+        server.settings = self._orig_settings
+        server.audit_log_dir = self._orig_audit_dir
+        self._tmp.cleanup()
+
+    def test_markdown_export_with_traces_renders_tree(self):
+        resp = self.client.get("/export?traces=true")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("任务轨迹导出", resp.text)
+        self.assertIn("[子任务1]", resp.text)
+        self.assertIn("问题", resp.text)  # 主对话照常在
+
+    def test_export_without_traces_unchanged(self):
+        resp = self.client.get("/export")
+        self.assertNotIn("任务轨迹导出", resp.text)
+        self.assertIn("1. [用户]", resp.text)
+
+    def test_json_export_with_traces_includes_events(self):
+        resp = self.client.get("/export?format=json&traces=true")
+        payload = resp.json()
+        self.assertEqual(len(payload["traces"]), 1)
+        self.assertEqual(payload["traces"][0]["task"], "任务X")
 
 
 class HealthEndpointTest(unittest.TestCase):

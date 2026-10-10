@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     # Agent 任务最大思考轮数（引擎侧硬上限，超过则以 partial 终态收尾）
     agent_max_iterations: int = Field(default=8, ge=1)
 
+    # 多 Agent 编排（docs/specs/0004）：派发闸门与并行度；critic 收尾审查开关
+    agent_max_subtasks: int = Field(default=6, ge=1)
+    agent_max_parallel: int = Field(default=3, ge=1)
+    agent_critic_enabled: bool = True
+
     # 技能包目录（相对项目根）；清单注入条数上限（超出走 search_skills）
     skills_dir: str = "skills"
     skills_catalog_max: int = Field(default=30, ge=1)

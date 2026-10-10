@@ -8,7 +8,7 @@
 
 import datetime
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -71,6 +71,15 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
+    def subset(self, names: Iterable[str]) -> "ToolRegistry":
+        """按名称取子集（子 agent 按需装配工具用）；未注册的名字直接跳过。"""
+        registry = ToolRegistry()
+        for name in names:
+            tool = self._tools.get(name)
+            if tool is not None:
+                registry.register(tool)
+        return registry
+
     def openai_schemas(self) -> list[dict]:
         return [tool.openai_schema() for tool in self._tools.values()]
 
@@ -105,6 +114,9 @@ def get_current_time() -> str:
 
 
 SKILL_TOOL_NAMES = ("use_skill", "search_skills", "create_skill")
+
+# 占位工具集的名称（default_registry 注册；子 agent 未点名工具时的默认下放集）
+DEFAULT_TOOL_NAMES = ("get_current_time", "calculator")
 
 
 def skill_tools(skills: "SkillRegistry") -> list[Tool]:

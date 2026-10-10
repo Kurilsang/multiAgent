@@ -61,5 +61,24 @@ class ResolveTargetTest(unittest.TestCase):
             self.make_settings(max_context_messages=1)
 
 
+class MultiAgentConfigTest(unittest.TestCase):
+    """多 Agent 编排配置（docs/specs/0004）：缺省值与下界。"""
+
+    def make_settings(self, **overrides) -> Settings:
+        return Settings(_env_file=None, **overrides)
+
+    def test_multi_agent_defaults(self):
+        settings = self.make_settings()
+        self.assertTrue(settings.agent_critic_enabled)  # critic 收尾默认开
+        self.assertEqual(settings.agent_max_subtasks, 6)
+        self.assertEqual(settings.agent_max_parallel, 3)
+
+    def test_multi_agent_bounds(self):
+        with self.assertRaises(ValidationError):
+            self.make_settings(agent_max_subtasks=0)
+        with self.assertRaises(ValidationError):
+            self.make_settings(agent_max_parallel=0)
+
+
 if __name__ == "__main__":
     unittest.main()

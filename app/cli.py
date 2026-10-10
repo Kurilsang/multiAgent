@@ -34,11 +34,13 @@ from .agent import (
     ActionObserved,
     ActionStarted,
     AgentEngine,
+    CancelToken,
     TaskFailed,
     TaskFinished,
     ThoughtDelta,
     truncate_text,
 )
+from .audit import TaskAuditLog
 from .config import (
     PROJECT_ROOT,
     PROVIDERS,
@@ -124,16 +126,25 @@ def run_agent_task(
     provider: str,
     model: str | None,
 ) -> None:
-    """执行一次任务并实时渲染事件流；完成后把「请求 + 答案」回写主对话。
+    """执行一次任务：编排器事件实时渲染，子 agent 轨迹只进审计日志。
 
+    多 Agent（docs/specs/0004）：子 agent / critic 轨迹不逐事件渲染（WebUI
+    才是轨迹树的展示面），最终答案自带子任务状态清单；全事件落
+    logs/tasks/*.jsonl 审计日志供回看。Ctrl+C 叫停任务（含在跑子 agent）。
     回写约定（见 CONTEXT.md「主对话」）：completed / partial 回写答案，
     FAILED 与中断不回写，主对话保持一问一答的连贯性。
     """
     console.print(f"[bold magenta]任务[/bold magenta] > {escape(task)}")
+    cancel = CancelToken()
+    audit = TaskAuditLog(task)
+    stream = agent.run(task, provider, model, cancel=cancel)
     in_thought = False
     answer: str | None = None
     try:
-        for event in agent.run(task, provider, model):
+        for event in stream:
+            audit.record(event)
+            if getattr(event, "role", "orchestrator") != "orchestrator":
+                continue  # 子 agent / 审查轨迹：只留审计日志，CLI 不逐事件渲染
             if isinstance(event, ThoughtDelta):
                 if not in_thought:
                     console.print("[dim]思考[/dim] > ", end="")
@@ -177,7 +188,14 @@ def run_agent_task(
                     f"{escape(event.reason)}[/red]"
                 )
     except KeyboardInterrupt:
-        console.print("\n[yellow]已中断任务（轨迹未回写主对话）[/yellow]")
+        cancel.cancel()
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
+        console.print(
+            "\n[yellow]已叫停任务（子 agent 陆续退出，完整轨迹见 logs/tasks 审计日志；"
+            "未回写主对话）[/yellow]"
+        )
         return
     if answer is not None:
         conversation.add("user", task)
@@ -245,6 +263,9 @@ def main() -> int:
         skills=skill_registry,
         catalog_max=settings.skills_catalog_max,
         observation_pool=observation_pool,
+        critic_enabled=settings.agent_critic_enabled,
+        max_subtasks=settings.agent_max_subtasks,
+        max_parallel=settings.agent_max_parallel,
     )
 
     console.print("[bold]multiagent 终端对话[/bold]")

@@ -1,12 +1,12 @@
 # multiagent
 
-针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式单 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡 + 动态 OAuth 授权流）。
+针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡 + 动态 OAuth 授权流）；第六步多 Agent 协作已落地（编排器派发 + 并行子任务 + critic 收尾 + 轨迹树与审计日志）。
 
 ## 特性
 
 - **统一接入**：三家厂商均通过 OpenAI 兼容 API 接入，一个 SDK 覆盖全部
 - **上下文支持**：内存维护单会话历史，自动按上限截断（保留 system + 最近 N 条）
-- **Agent 任务**：`/agent` 发起自主多步任务——状态机编排（见 docs/adr/0001）、双层终止（见 docs/adr/0002）、死循环止损、partial 进展摘要
+- **Agent 任务**：`/agent` 发起自主多步任务——状态机编排（见 docs/adr/0001、0003）、双层终止（见 docs/adr/0002）、死循环止损、partial 进展摘要；多 Agent 编排：`dispatch_task` 派发子任务并行执行（动态装配、深度限一层）、critic 收尾审查（不合格回炉一次）、随时叫停、全轨迹审计日志
 - **工具 + 技能**：工具走 function calling 通道；技能为文件化提示词包（`skills/<名称>/SKILL.md`），动态清单 + `use_skill` 按需激活，Agent 可用 `create_skill` 自产技能
 - **技能市场**：预设平台 / Git URL / 本地目录安装（覆盖 anthropics/skills、skills.sh 等 SKILL.md 生态），WebUI 管理启停/删除/查看，热生效无需重启
 - **技能在线目录**：独立爬取服务（`services/catalog/`，隔离区）抓取 skills.sh / LobeHub / 官方 MCP Registry 目录——SQLite 缓存 + 定时刷新 + 陈旧标注；市场页「在线浏览」搜索翻页（技能 / MCP 按资产类型过滤）→ 单次确认卡（manifest 预览 + 审计徽标）→ 一键安装；外网元数据交互集中在隔离区（可独立部署升级），MCP 会话流量由主服务直连远程端点（见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）
@@ -148,17 +148,18 @@ app/
 ├── config.py        # .env 加载、厂商注册表、目标解析（支持按厂商覆盖 base_url）
 ├── llm.py           # OpenAI SDK 统一封装（流式/非流式、function calling、思考链转写、错误转译）
 ├── conversation.py  # 主对话历史管理与截断
-├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、动态技能清单/预激活
+├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、多 Agent 派发/critic、动态技能清单/预激活
 ├── skills.py        # 技能注册表：SKILL.md 解析/校验/自产、启停状态、安装器（Git/本地）
 ├── mcp.py           # MCP 连接定义模型 + 运行时管理器（client factory 测试缝、stdio/streamable-http 会话）
 ├── mcp_auth.py      # MCP 动态 OAuth 授权（token 文件存储 + 授权码/PKCE 贴码 + 设备码 + 授权状态）
 ├── observation.py   # 观察值视图 + 旁存续读（内存句柄池 LRU、read_tool_result 元工具）
+├── audit.py         # 任务审计日志：logs/tasks/*.jsonl 全事件留痕（含子 agent 轨迹，只可回看）
 ├── tools.py         # 工具注册表 + 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）
-├── export.py        # 对话导出格式化（markdown / json 纯函数）
+├── export.py        # 对话导出格式化（markdown / json 纯函数 + 任务轨迹协作树渲染）
 ├── cli.py           # 终端入口（/chat 流式 + /agent 任务 + /export 导出）
-├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/skills*、/mcp*、/market、/export）
+├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/agent/stop、/skills*、/mcp*、/market、/export）
 └── static/
-    └── index.html   # WebUI（聊天流式 + 任务时间线 + / 技能弹层 + 统一市场：技能/MCP 双类资产已安装/在线浏览 + 单次确认卡，无框架，单文件）
+    └── index.html   # WebUI（聊天流式 + 任务时间线轨迹树 + 停止按钮 + / 技能弹层 + 统一市场：技能/MCP 双类资产已安装/在线浏览 + 单次确认卡，无框架，单文件）
 services/
 └── catalog/         # 在线目录爬取服务（独立进程，隔离区 = 唯一外网元数据交互点）
     ├── app.py       # /internal/* 窄合同 + /health
@@ -203,6 +204,8 @@ tests/
 
 见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）；`AGENT_MAX_ITERATIONS` 控制 Agent 任务的最大思考轮数（最小 1，超过则以 partial 进展摘要收尾）。
 
+多 Agent 编排：`AGENT_MAX_SUBTASKS` 控制子任务总数上限（默认 6，派发闸门：跨批累计、含回炉重派）；`AGENT_MAX_PARALLEL` 控制子任务并行度（默认 3）；`AGENT_CRITIC_ENABLED` 控制 critic 收尾审查（默认开：每任务一次审查调用、最多一次整体回炉，置 0 关闭）。
+
 技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）；`CATALOG_BASE_URL` 指向技能在线目录爬取服务（默认 `http://127.0.0.1:8100`，留空则关闭在线目录并隐藏入口）；`CATALOG_AUTOSTART` 控制主服务是否自动托管本机爬取服务（默认开，外部部署/自行管理时置 0）。爬取服务自身配置（`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` / `CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`）见 [services/catalog/README.md](services/catalog/README.md)。
 
 MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`MCP_TOKEN_FILE` 为 OAuth token 文件（默认 `mcp/tokens.json`，`auth: oauth` 服务的授权产物：权限收紧、不入库、不进 `.env` 明文）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）。
@@ -230,8 +233,8 @@ python -m unittest discover tests -v
 
 ## 已知范围限制
 
-- 单会话内存上下文：服务重启后历史与任务轨迹清空；接口内部已加锁串行化，适合单用户/低并发使用
-- Agent 任务为单 Agent 循环：多 Agent 协作仅预留状态机后门（新增状态与迁移边即可，见 docs/adr/0001）
+- 单会话内存上下文：服务重启后历史与任务轨迹清空（审计日志落盘可回看、不提供恢复）；接口内部已加锁串行化，适合单用户/低并发使用
+- 多 Agent 编排为一层深度（子 agent 不能再派发）；critic 默认开启 = 每任务多一次审查调用、最多一次整体重跑（`AGENT_CRITIC_ENABLED=0` 可关）；MCP 工具不随派发默认下放，需编排器显式点名
 - MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；密钥支持静态 env/header（`${VAR}` 占位 + `.env`，推荐长期 PAT）与 `auth: oauth` 动态授权流（授权码 + PKCE 终端贴码 / 无头设备码；token 存 `MCP_TOKEN_FILE` 独立文件、过期自动刷新，刷新失败降级为连接错误提示重新授权；OAuth 首次授权在装配期终端交互完成，无浏览器自助重定向服务）；mcpb 单文件包条目暂不支持安装（后续扩展点）；官方 MCP Registry 处于 preview 阶段（schema 可能变更），默认翻到游标耗尽（2000 页硬上限防失控）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令（确认卡已披露命令原文）
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
@@ -239,7 +242,6 @@ python -m unittest discover tests -v
 
 ## 后续规划
 
-- 多 Agent 协作（评审者/执行者分工，复用状态机引擎）
 - MCP 市场后续扩展：mcpb 单文件包下载安装、ClawHub 适配器、已验证源免确认白名单；`/` 技能弹层混入在线目录
 - 技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub API）、zip 上传、版本与更新检查
 - 多会话管理与持久化

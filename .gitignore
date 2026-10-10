@@ -8,6 +8,9 @@ __pycache__/
 .venv/
 venv/
 
+# 任务审计日志（部署本地留痕，不入库）
+logs/
+
 # 技能在线目录爬取服务的本地缓存库（含平台凭证，不入库）
 services/catalog/catalog.db
 

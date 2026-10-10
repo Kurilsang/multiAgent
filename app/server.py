@@ -57,14 +57,16 @@ from .agent import (
     ActionObserved,
     ActionStarted,
     AgentEngine,
+    CancelToken,
     TaskFailed,
     TaskFinished,
     TaskStarted,
     ThoughtDelta,
 )
+from .audit import TaskAuditLog, read_task_logs
 from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
 from .conversation import Conversation
-from .export import to_json, to_markdown
+from .export import to_json, to_markdown, traces_to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
 from .mcp import (
     McpError,
@@ -100,6 +102,8 @@ llm = LLMClient(settings)
 conversation = Conversation(
     system_prompt=None, max_messages=settings.max_context_messages
 )
+# 审计日志落点（None = logs/tasks；测试注入临时目录保持封闭）
+audit_log_dir: Path | None = None
 
 
 def _build_wiring(
@@ -144,6 +148,9 @@ def _build_wiring(
         skills=skills,
         catalog_max=settings.skills_catalog_max,
         observation_pool=pool,
+        critic_enabled=settings.agent_critic_enabled,
+        max_subtasks=settings.agent_max_subtasks,
+        max_parallel=settings.agent_max_parallel,
     )
     return tools, skills, errors, engine, mcp
 
@@ -167,7 +174,7 @@ _DOTENV_PATH = PROJECT_ROOT / ".env"
 
 app = FastAPI(
     title="multiagent",
-    description="内部网关场景 Agent —— 第五步 MCP 市场已落地（含动态 OAuth 授权流；第三、四步技能市场 + 在线目录为其底座）",
+    description="内部网关场景 Agent —— 第六步多 Agent 协作已落地（编排派发 + 并行子任务 + critic 收尾；前五步三厂商对话、ReAct 循环、技能市场、在线目录、MCP 市场为其底座）",
 )
 
 
@@ -228,19 +235,30 @@ def reset() -> dict:
 
 
 @app.get("/export")
-def export_conversation(format: str = "markdown") -> Response:
-    """导出主对话历史：markdown 便于直接粘贴给 AI 排障，json 供程序处理。"""
+def export_conversation(format: str = "markdown", traces: bool = False) -> Response:
+    """导出主对话历史：markdown 便于直接粘贴给 AI 排障，json 供程序处理。
+
+    traces=true 显式附上任务轨迹（审计日志渲染的协作树），默认只导主对话。
+    """
     with _chat_lock:
         messages = conversation.history()
+    task_logs = read_task_logs(audit_log_dir) if traces else []
     fmt = format.strip().lower()
     if fmt in ("markdown", "md"):
+        body = to_markdown(messages, default_provider=settings.llm_provider)
+        if task_logs:
+            body += "\n\n---\n\n" + traces_to_markdown(task_logs)
         return Response(
-            to_markdown(messages, default_provider=settings.llm_provider),
+            body,
             media_type="text/markdown; charset=utf-8",
         )
     if fmt == "json":
         return Response(
-            to_json(messages, default_provider=settings.llm_provider),
+            to_json(
+                messages,
+                default_provider=settings.llm_provider,
+                traces=task_logs or None,
+            ),
             media_type="application/json; charset=utf-8",
         )
     raise HTTPException(
@@ -465,31 +483,67 @@ class AgentRequest(BaseModel):
         return value
 
 
+def _identity_fields(event) -> dict:
+    """事件的 agent 身份字段；根 agent（编排器本尊）的帧保持向后兼容不含。"""
+    agent_id = getattr(event, "agent_id", "main")
+    role = getattr(event, "role", "orchestrator")
+    parent_id = getattr(event, "parent_id", None)
+    if agent_id == "main" and role == "orchestrator" and parent_id is None:
+        return {}
+    return {
+        "agent_id": agent_id,
+        "agent_name": getattr(event, "agent_name", ""),
+        "role": role,
+        "parent_id": parent_id,
+    }
+
+
 def _agent_event_frame(event) -> dict:
-    """把引擎事件编码为 SSE 载荷。"""
+    """把引擎事件编码为 SSE 载荷（子 agent 事件附 agent 身份字段）。"""
     if isinstance(event, TaskStarted):
-        return {"type": "task_started"}
-    if isinstance(event, ThoughtDelta):
-        return {"type": "thought_delta", "text": event.text}
-    if isinstance(event, ActionStarted):
-        return {"type": "action", "tool": event.tool_name, "arguments": event.arguments}
-    if isinstance(event, ActionObserved):
-        return {
+        frame = {"type": "task_started"}
+    elif isinstance(event, ThoughtDelta):
+        frame = {"type": "thought_delta", "text": event.text}
+    elif isinstance(event, ActionStarted):
+        frame = {"type": "action", "tool": event.tool_name, "arguments": event.arguments}
+    elif isinstance(event, ActionObserved):
+        frame = {
             "type": "observation",
             "tool": event.tool_name,
             "text": event.result,
             "is_error": event.is_error,
         }
-    if isinstance(event, TaskFinished):
-        return {
+    elif isinstance(event, TaskFinished):
+        frame = {
             "type": "final",
             "status": event.status,
             "answer": event.answer,
             "iterations": event.iterations,
         }
-    if isinstance(event, TaskFailed):
-        return {"type": "failed", "reason": event.reason, "iterations": event.iterations}
-    raise RuntimeError(f"未知的引擎事件类型: {type(event).__name__}")
+    elif isinstance(event, TaskFailed):
+        frame = {"type": "failed", "reason": event.reason, "iterations": event.iterations}
+    else:
+        raise RuntimeError(f"未知的引擎事件类型: {type(event).__name__}")
+    frame.update(_identity_fields(event))
+    return frame
+
+
+# 当前任务的取消令牌（单会话单任务：_chat_lock 保证唯一在跑任务，「当前任务」良定义）
+_current_cancel: CancelToken | None = None
+_current_cancel_lock = threading.Lock()
+
+
+def _register_cancel(cancel: CancelToken) -> None:
+    global _current_cancel
+    with _current_cancel_lock:
+        _current_cancel = cancel
+
+
+def _unregister_cancel(cancel: CancelToken) -> None:
+    global _current_cancel
+    with _current_cancel_lock:
+        if _current_cancel is cancel:
+            _current_cancel = None
 
 
 def _agent_frames(
@@ -500,18 +554,36 @@ def _agent_frames(
 ) -> Iterator[str]:
     """Agent 任务 SSE：思考逐字实时转发，动作/观察按步推送，终态带原因。
 
+    全事件落审计日志（logs/tasks/*.jsonl，含子 agent 轨迹，中断/叫停留痕）；
     completed / partial 回写「请求 + 最终答案」到主对话；
-    activated 为 /技能名 显式点名的预激活技能。
+    activated 为 /技能名 显式点名的预激活技能；客户端断连兜底置取消标志。
     """
-    with _chat_lock:
-        answer: str | None = None
-        for event in agent_engine.run(task, provider, model, activated=activated):
-            yield _sse(_agent_event_frame(event))
-            if isinstance(event, TaskFinished):
-                answer = event.answer
-        if answer is not None:
-            conversation.add("user", task)
-            conversation.add("assistant", answer)
+    cancel = CancelToken()
+    audit = TaskAuditLog(task, directory=audit_log_dir)
+    stream = agent_engine.run(
+        task, provider, model, activated=activated, cancel=cancel
+    )
+    _register_cancel(cancel)
+    answer: str | None = None
+    try:
+        with _chat_lock:
+            for event in stream:
+                audit.record(event)
+                yield _sse(_agent_event_frame(event))
+                if isinstance(event, TaskFinished) and getattr(
+                    event, "role", "orchestrator"
+                ) == "orchestrator":
+                    answer = event.answer
+            if answer is not None:
+                conversation.add("user", task)
+                conversation.add("assistant", answer)
+    finally:
+        # 断连/异常兜底：置取消标志让在跑子 agent 在迭代边界退出，再收掉生成器
+        cancel.cancel()
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
+        _unregister_cancel(cancel)
 
 
 @app.post("/agent/stream")
@@ -529,6 +601,17 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@app.post("/agent/stop")
+def agent_stop() -> dict:
+    """叫停当前任务（含在跑子 agent）：置取消标志，任务以 partial 收尾。"""
+    with _current_cancel_lock:
+        cancel = _current_cancel
+    if cancel is None:
+        return {"status": "idle", "stopped": False}
+    cancel.cancel()
+    return {"status": "ok", "stopped": True}
 
 
 # ---- MCP 管理面 ----

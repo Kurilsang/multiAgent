@@ -82,6 +82,45 @@ def make_registry(name="echo", result="ok", error=None) -> ToolRegistry:
     return registry
 
 
+# ---- 多 Agent 编排（app/agent 派发）测试替身：执行器注入缝 ----
+
+
+class InlineExecutor:
+    """同步执行器（测试缝）：submit 即在当前线程执行，事件顺序确定。"""
+
+    def submit(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        return None
+
+
+class RecordingExecutor:
+    """记录并发峰值的线程池替身（断言并行度受 AGENT_MAX_PARALLEL 约束）。"""
+
+    def __init__(self, max_workers: int):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._pool = ThreadPoolExecutor(max_workers=max_workers)
+        self._lock = __import__("threading").Lock()
+        self.active = 0
+        self.peak = 0
+
+    def submit(self, fn, *args, **kwargs):
+        def wrapped():
+            with self._lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            try:
+                fn(*args, **kwargs)
+            finally:
+                with self._lock:
+                    self.active -= 1
+
+        return self._pool.submit(wrapped)
+
+    def shutdown(self):
+        self._pool.shutdown(wait=True)
+
+
 # ---- MCP 连接（app/mcp）测试替身：client factory 注入缝 ----
 
 

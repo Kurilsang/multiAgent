@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import app.server as server
 
+from tests.fakes import SessionStoreMixin
 from tests.test_server_stream import StubSettings
 
 
@@ -60,7 +61,7 @@ PACK_INVALID = {
 }
 
 
-class MarketApiTest(unittest.TestCase):
+class MarketApiTest(SessionStoreMixin, unittest.TestCase):
     def setUp(self):
         self._orig = (
             server.settings,
@@ -72,7 +73,7 @@ class MarketApiTest(unittest.TestCase):
             server._catalog_client,
         )
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self._tmp = tempfile.TemporaryDirectory()
         (
             server.tool_registry,
@@ -84,7 +85,6 @@ class MarketApiTest(unittest.TestCase):
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         (
             server.settings,
             server.tool_registry,
@@ -95,6 +95,7 @@ class MarketApiTest(unittest.TestCase):
             server._catalog_client,
         ) = self._orig
         self._tmp.cleanup()
+        self.teardown_session_store()
 
     def test_market_proxies_pass_through(self):
         fake = FakeCatalogHttp(

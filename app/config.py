@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     # 聊天通道迷你工具循环上限（技能激活与依赖工具调用的轮数）
     chat_max_tool_turns: int = Field(default=4, ge=1)
 
+    # 会话库（相对项目根）：主对话历史落 SQLite，重启后仍在（docs/specs/0005）。
+    # 与审计日志分开存放——会话是一等状态，logs/ 是可丢弃留痕
+    session_db: str = "data/sessions.db"
+
     api_host: str = "127.0.0.1"
     api_port: int = 8000
 

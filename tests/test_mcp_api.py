@@ -14,6 +14,7 @@ from tests.fakes import (
     FakeLLMClient,
     FakeMcpOAuth,
     FakeMcpSession,
+    SessionStoreMixin,
     load_catalog_fixture,
     make_mcp_tool,
     text_round,
@@ -34,7 +35,7 @@ def good_entry(**overrides):
     return entry
 
 
-class McpApiHarness(unittest.TestCase):
+class McpApiHarness(SessionStoreMixin, unittest.TestCase):
     def setUp(self):
         self._orig = (
             server.settings,
@@ -45,7 +46,7 @@ class McpApiHarness(unittest.TestCase):
             server.mcp_manager,
         )
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.config = self.root / "mcp" / "servers.json"
@@ -61,7 +62,6 @@ class McpApiHarness(unittest.TestCase):
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         (
             server.settings,
             server.tool_registry,
@@ -71,6 +71,7 @@ class McpApiHarness(unittest.TestCase):
             server.mcp_manager,
         ) = self._orig
         self._tmp.cleanup()
+        self.teardown_session_store()
 
     def write_config(self, payload):
         text = payload if isinstance(payload, str) else json.dumps(payload)

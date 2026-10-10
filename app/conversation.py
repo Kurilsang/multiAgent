@@ -15,6 +15,23 @@ class Conversation:
         self._max_messages = max_messages
         self._history: list[dict] = []
 
+    @classmethod
+    def from_history(
+        cls,
+        history: list[dict],
+        system_prompt: str | None = None,
+        max_messages: int = 20,
+    ) -> "Conversation":
+        """由持久化历史重建上下文（docs/specs/0005）。
+
+        只取 role/content：provider/model/思考链/工具步骤是展示面信息，
+        不进模型上下文。截断策略与内存态完全一致（读时截断）。
+        """
+        conversation = cls(system_prompt=system_prompt, max_messages=max_messages)
+        for message in history:
+            conversation.add(message["role"], message["content"])
+        return conversation
+
     def add(self, role: str, content: str) -> None:
         if role not in ("user", "assistant"):
             raise ValueError(f"不支持的消息角色: {role!r}")

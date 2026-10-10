@@ -84,6 +84,12 @@ from .observation import (
     format_observation,
     read_tool_result_tool,
 )
+from .sessions import (
+    DEFAULT_SESSION_ID,
+    SessionStore,
+    SessionStoreError,
+    session_name_from,
+)
 from .skills import (
     PRESET_SOURCES,
     SkillEntry,
@@ -95,15 +101,75 @@ from .skills import (
     parse_external_skill,
     resolve_skills_dir,
 )
+from .tasks import SubscriberOverflow, TaskBusy, TaskHub, TaskRecord
 from .tools import SKILL_TOOL_NAMES, default_registry, skill_tools
 
 settings = Settings()
 llm = LLMClient(settings)
-conversation = Conversation(
-    system_prompt=None, max_messages=settings.max_context_messages
-)
 # 审计日志落点（None = logs/tasks；测试注入临时目录保持封闭）
 audit_log_dir: Path | None = None
+# 会话库落点（None = SESSION_DB 配置；测试注入临时库保持封闭）
+session_db_path: Path | None = None
+
+
+def _open_session_store(path: Path | None = None) -> SessionStore:
+    """打开会话库并认领数据目录（多进程共享即拒绝启动）。"""
+    resolved = path or resolve_config_path(settings.session_db, PROJECT_ROOT)
+    store = SessionStore(resolved)
+    store.claim()
+    store.ensure_default_session()
+    store.start_heartbeat()
+    return store
+
+
+# 会话库惰性打开：导入本模块不产生磁盘写入（测试套件保持封闭，
+# 不往仓库 data/ 落库）；真实启动在 __main__ 里显式预热以 fail loud。
+_session_store: SessionStore | None = None
+
+
+def get_session_store() -> SessionStore:
+    """取会话库（首次访问时打开）。"""
+    global _session_store
+    if _session_store is None:
+        _session_store = _open_session_store(session_db_path)
+    return _session_store
+
+
+def reset_session_store(path: Path | None = None) -> None:
+    """关掉当前会话库并改用新路径（测试缝：注入临时库保持封闭）。"""
+    global _session_store, session_db_path
+    if _session_store is not None:
+        _session_store.close()
+        _session_store = None
+    session_db_path = path
+
+
+class _SessionStoreProxy:
+    """会话库惰性代理：调用点写法不变，首次触碰才真正打开。"""
+
+    def __getattr__(self, name):
+        return getattr(get_session_store(), name)
+
+
+session_store = _SessionStoreProxy()
+
+
+def _shutdown() -> None:
+    """停机：先让在跑任务收尾落盘，再关会话库。
+
+    顺序要紧——atexit 是后进先出，所以这里合成一个钩子显式排序；
+    分开注册会让库先关、任务再写终态（写不进去）。等待是**有上限**的：
+    任务线程是守护线程，不能让退出无限期挂着（SPEC-0005 T1 尽力而为）。
+    """
+    task_hub.stop_all()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and task_hub.running_tasks():
+        time.sleep(0.05)
+    if _session_store is not None:
+        _session_store.close()
+
+
+atexit.register(_shutdown)
 
 
 def _build_wiring(
@@ -164,8 +230,14 @@ tool_registry, skill_registry, skill_load_errors, agent_engine, mcp_manager = (
 )
 atexit.register(mcp_manager.close)
 
-# 单会话范围：串行化对话轮次，避免并发 /chat 互相污染同一份历史
-_chat_lock = threading.Lock()
+# 管理面锁：只护短临界区（技能 / MCP 写操作），任务在跑时不再阻塞管理操作
+# （SPEC-0005 T1）。会话历史的一致性由 SQLite 的原子追加保证。
+_admin_lock = threading.Lock()
+# 任务登记处：任务生命周期独立于 HTTP 连接（断连 = 退订，不置取消、不持锁）
+task_hub = TaskHub()
+# 停机钩子：置全部在跑任务的取消标志，让它们尽快收尾并落盘终态。
+# 尽力而为——任务线程是守护线程，进程退出时不会无限等（SPEC-0005 T1）。
+atexit.register(task_hub.stop_all)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -188,6 +260,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     provider: str | None = None
     model: str | None = None
+    session_id: str | None = None
 
     @field_validator("message")
     @classmethod
@@ -227,21 +300,138 @@ def providers() -> dict:
     }
 
 
+# ---- 会话（SPEC-0005）：历史权威副本在会话库，内存只做当轮上下文 ----
+# 会话运行锁：每会话一把，保证「同一会话同时最多一个在跑任务 / 聊天轮次」；
+# 不同会话互不阻塞（这是把全局锁拆开的收益所在）。
+_session_locks: dict[str, threading.Lock] = {}
+_session_locks_lock = threading.Lock()
+
+
+def _session_lock(session_id: str) -> threading.Lock:
+    with _session_locks_lock:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[session_id] = lock
+        return lock
+
+
+def _resolve_session(session_id: str | None) -> str:
+    """解析请求的会话标识：缺省落默认会话，显式指定但不存在则 404。"""
+    if not session_id or not session_id.strip():
+        return session_store.ensure_default_session()
+    sid = session_id.strip()
+    if session_store.get_session(sid) is None:
+        raise HTTPException(status_code=404, detail=f"未找到会话: {sid}")
+    return sid
+
+
+def _name_session_from_first_message(session_id: str, text: str) -> None:
+    """无名会话以首条用户消息命名（命名规则只在 app/sessions.py 一处）。"""
+    session = session_store.get_session(session_id)
+    if session is None or session["name"]:
+        return
+    name = session_name_from(text)
+    if name:
+        session_store.rename_session(session_id, name)
+
+
+def _conversation_for(session_id: str) -> Conversation:
+    """按会话库里的历史重建模型上下文（展示全量、入模截断）。"""
+    history = session_store.messages(session_id)
+    return Conversation.from_history(
+        [{"role": m["role"], "content": m["content"]} for m in history],
+        max_messages=settings.max_context_messages,
+    )
+
+
+class SessionNameRequest(BaseModel):
+    name: str = Field(min_length=1)
+
+
+class SessionCreateRequest(BaseModel):
+    name: str = ""
+
+
 @app.post("/reset")
 def reset() -> dict:
-    with _chat_lock:
-        conversation.reset()
+    """新建一段对话（SPEC-0005 Q6）：旧会话留在列表里，不销毁任何记录。"""
+    session_id = session_store.create_session()
+    return {"status": "ok", "session_id": session_id}
+
+
+@app.get("/sessions")
+def list_sessions() -> dict:
+    """会话列表（最近更新在前），附默认会话标识与各会话在跑任务。
+
+    running_task_id 让 WebUI 在刷新后能发现「本会话还有任务在跑」并接回
+    （SPEC-0005 T5）。
+    """
+    sessions = session_store.list_sessions()
+    for entry in sessions:
+        entry["running_task_id"] = task_hub.running_task_id(entry["id"])
+    return {
+        "sessions": sessions,
+        "default_session_id": session_store.ensure_default_session(),
+    }
+
+
+@app.post("/sessions")
+def create_session(req: SessionCreateRequest | None = None) -> dict:
+    """新建会话；不传 name 时由首条消息命名（WebUI 先建会话再发首条消息）。
+
+    name 缺省留空，等首条消息落库时用 session_name_from 补上——
+    命名规则只有一处实现（app/sessions.py），前端不再复制一份截断逻辑。
+    """
+    session_id = session_store.create_session(req.name if req else "")
+    return {"status": "ok", "session_id": session_id}
+
+
+@app.get("/sessions/{session_id}/messages")
+def session_messages(session_id: str) -> dict:
+    """会话历史全量（展示用）：含思考链、工具步骤、失败标记与厂商归属。"""
+    session = session_store.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"未找到会话: {session_id}")
+    return {"session": session, "messages": session_store.messages(session_id)}
+
+
+@app.post("/sessions/{session_id}/rename")
+def rename_session(session_id: str, req: SessionNameRequest) -> dict:
+    try:
+        session_store.rename_session(session_id, req.name)
+    except SessionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok", "session": session_store.get_session(session_id)}
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session(session_id: str) -> dict:
+    """硬删会话（审计日志保留：它是排障资产，不随会话消失）。"""
+    try:
+        session_store.delete_session(session_id)
+    except SessionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "ok"}
 
 
 @app.get("/export")
-def export_conversation(format: str = "markdown", traces: bool = False) -> Response:
-    """导出主对话历史：markdown 便于直接粘贴给 AI 排障，json 供程序处理。
+def export_conversation(
+    format: str = "markdown", traces: bool = False, session_id: str | None = None
+) -> Response:
+    """导出某个会话的主对话历史：markdown 便于粘贴排障，json 供程序处理。
 
     traces=true 显式附上任务轨迹（审计日志渲染的协作树），默认只导主对话。
     """
-    with _chat_lock:
-        messages = conversation.history()
+    sid = _resolve_session(session_id)
+    messages = [
+        {
+            "role": m["role"],
+            "content": m["content"],
+            **({"provider": m["provider"], "model": m["model"]} if m["provider"] else {}),
+        }
+        for m in session_store.messages(sid)
+    ]
     task_logs = read_task_logs(audit_log_dir) if traces else []
     fmt = format.strip().lower()
     if fmt in ("markdown", "md"):
@@ -266,22 +456,44 @@ def export_conversation(format: str = "markdown", traces: bool = False) -> Respo
     )
 
 
+def _record_failed_turn(session_id: str, detail: str) -> None:
+    """失败留痕（不回滚）：让「我问过、它失败了」在历史里看得见。"""
+    session_store.append(
+        session_id,
+        "assistant",
+        f"出错了：{detail}",
+        status="failed",
+    )
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    with _chat_lock:
-        conversation.add("user", req.message)
+    sid = _resolve_session(req.session_id)
+    _reject_if_busy(sid)
+    with _session_lock(sid):
+        # 用户消息先落库（模型调用前），失败不回滚
+        session_store.append(sid, "user", req.message)
+        _name_session_from_first_message(sid, req.message)
         try:
-            result = llm.chat(conversation.messages_for_api(), req.provider, req.model)
+            result = llm.chat(
+                _conversation_for(sid).messages_for_api(), req.provider, req.model
+            )
         except ConfigError as exc:
-            conversation.pop_last()
+            _record_failed_turn(sid, str(exc))
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except LLMError as exc:
-            conversation.pop_last()
+            _record_failed_turn(sid, str(exc))
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         except Exception as exc:
-            conversation.pop_last()
+            _record_failed_turn(sid, f"内部错误: {exc}")
             raise HTTPException(status_code=500, detail=f"内部错误: {exc}") from exc
-        conversation.add("assistant", result.content)
+        session_store.append(
+            sid,
+            "assistant",
+            result.content,
+            provider=result.provider,
+            model=result.model,
+        )
     return ChatResponse(
         reply=result.content, provider=result.provider, model=result.model
     )
@@ -355,15 +567,17 @@ def _chat_tool_call(
     return frame, message, activated
 
 
-def _chat_frames(req: ChatRequest, target) -> Iterator[str]:
+def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
     """聊天迷你工具循环：use_skill 激活后本轮可用其依赖工具。
 
-    仅最终文本（无工具调用那一轮）写入主对话；技能正文与工具中间态
-    是上下文通道产物，不落历史（与思考链同等待遇）。
-    达到 CHAT_MAX_TOOL_TURNS 上限时以 error 帧收尾并回滚本次提问。
+    持久化（SPEC-0005 Q7）：用户消息在调用模型**之前**落库；思考链与工具
+    轮次（行动/观察）随最终回复一并落库，否则刷新后的页面会比实时页少一截。
+    失败留痕不回滚——「我问过、它失败了」比「页面干净」更有价值。
     """
-    with _chat_lock:
-        conversation.add("user", req.message)
+    with _session_lock(session_id):
+        session_store.append(session_id, "user", req.message)
+        _name_session_from_first_message(session_id, req.message)
+        conversation = _conversation_for(session_id)
         system = catalog_section(skill_registry, settings.skills_catalog_max)
         messages: list[dict] = []
         if system:
@@ -380,12 +594,15 @@ def _chat_frames(req: ChatRequest, target) -> Iterator[str]:
         base_names = [*SKILL_TOOL_NAMES, READ_TOOL_NAME, *mcp_names]
         schemas = [tool_registry.get(name).openai_schema() for name in base_names]
         offered = set(base_names)
+        reasoning_parts: list[str] = []
+        steps: list[dict] = []
         try:
             for _ in range(settings.chat_max_tool_turns):
                 text_parts: list[str] = []
                 calls = []
                 for event in llm.chat_events(messages, req.provider, req.model, schemas):
                     if isinstance(event, ReasoningDelta):
+                        reasoning_parts.append(event.text)
                         yield _sse({"type": "reasoning_delta", "text": event.text})
                     elif isinstance(event, ResponseToolCalls):
                         calls = list(event.tool_calls)
@@ -393,7 +610,15 @@ def _chat_frames(req: ChatRequest, target) -> Iterator[str]:
                         text_parts.append(event.text)
                         yield _sse({"type": "delta", "text": event.text})
                 if not calls:
-                    conversation.add("assistant", "".join(text_parts))
+                    session_store.append(
+                        session_id,
+                        "assistant",
+                        "".join(text_parts),
+                        provider=target.provider,
+                        model=target.model,
+                        reasoning="".join(reasoning_parts),
+                        steps=steps,
+                    )
                     yield _sse(
                         {"type": "done", "provider": target.provider, "model": target.model}
                     )
@@ -412,26 +637,43 @@ def _chat_frames(req: ChatRequest, target) -> Iterator[str]:
                 }
                 messages.append(assistant)
                 for call in calls:
-                    yield _sse(
-                        {"type": "action", "tool": call.name, "arguments": _safe_args(call.arguments)}
-                    )
+                    step = {
+                        "type": "action",
+                        "tool": call.name,
+                        "arguments": _safe_args(call.arguments),
+                    }
+                    steps.append(step)
+                    yield _sse(step)
                     frame, message, activated = _chat_tool_call(call, offered)
+                    steps.append(frame)
                     yield _sse(frame)
                     messages.append(message)
                     for name in activated:
                         if name not in offered:
                             offered.add(name)
                             schemas.append(tool_registry.get(name).openai_schema())
-            conversation.pop_last()
-            yield _sse(
-                {
-                    "type": "error",
-                    "detail": f"本轮技能/工具调用超过上限（{settings.chat_max_tool_turns} 轮），"
-                    "请拆分请求，或点「任务」以自主任务执行",
-                }
+            detail = (
+                f"本轮技能/工具调用超过上限（{settings.chat_max_tool_turns} 轮），"
+                "请拆分请求，或点「任务」以自主任务执行"
             )
+            session_store.append(
+                session_id,
+                "assistant",
+                f"出错了：{detail}",
+                status="failed",
+                reasoning="".join(reasoning_parts),
+                steps=steps,
+            )
+            yield _sse({"type": "error", "detail": detail})
         except LLMError as exc:
-            conversation.pop_last()
+            session_store.append(
+                session_id,
+                "assistant",
+                f"出错了：{exc}",
+                status="failed",
+                reasoning="".join(reasoning_parts),
+                steps=steps,
+            )
             yield _sse({"type": "error", "detail": str(exc)})
 
 
@@ -456,15 +698,19 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    session_id = _resolve_session(req.session_id)
+    _reject_if_busy(session_id)
     entry = skill_registry.match_prefix(req.message)
     if entry is not None:
-        return StreamingResponse(
-            _agent_frames(req.message, req.provider, req.model, activated=(entry.skill,)),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
+        return _task_stream(
+            session_id=session_id,
+            task=req.message,
+            provider=req.provider,
+            model=req.model,
+            activated=(entry.skill,),
         )
     return StreamingResponse(
-        _chat_frames(req, target),
+        _chat_frames(req, target, session_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
@@ -474,6 +720,10 @@ class AgentRequest(BaseModel):
     task: str = Field(min_length=1)
     provider: str | None = None
     model: str | None = None
+    session_id: str | None = None
+    # 重连续流：带 task_id 时接回既有任务，from_seq 之后的缺口先补发
+    task_id: str | None = None
+    from_seq: int = Field(default=0, ge=0)
 
     @field_validator("task")
     @classmethod
@@ -528,90 +778,237 @@ def _agent_event_frame(event) -> dict:
     return frame
 
 
-# 当前任务的取消令牌（单会话单任务：_chat_lock 保证唯一在跑任务，「当前任务」良定义）
-_current_cancel: CancelToken | None = None
-_current_cancel_lock = threading.Lock()
+# ---- 任务执行：后台运行 + SSE 只做订阅（SPEC-0005 T1） ----
+# 任务生命周期不再绑定 HTTP 连接：断连 = 退订，既不置取消标志也不持有
+# 会话锁，因此任务照常跑完、服务不会被一次刷新拖垮（修掉既有缺陷：
+# 收尾分支从不执行 → 锁永久泄漏 → /export 超时、停止按钮失效）。
 
 
-def _register_cancel(cancel: CancelToken) -> None:
-    global _current_cancel
-    with _current_cancel_lock:
-        _current_cancel = cancel
+def _reject_if_busy(session_id: str) -> None:
+    """同会话已有在跑任务或正在进行的聊天轮次时明确拒绝（不排队、不阻塞）。
+
+    两个来源都要查：任务在后台跑（task_hub），而聊天轮次持有会话锁
+    （`_session_lock`）。只查前者的话，一次长聊天期间发起的任务会溜进来，
+    同一会话就会出现两个模型调用 + 交错的落库写入。
+    """
+    running = task_hub.running_task_id(session_id)
+    if running is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前会话已有任务在跑（{running}）：请先停止它或等它结束",
+        )
+    if _session_lock(session_id).locked():
+        raise HTTPException(
+            status_code=409,
+            detail="当前会话正有一轮对话在进行：请等它结束再发起",
+        )
 
 
-def _unregister_cancel(cancel: CancelToken) -> None:
-    global _current_cancel
-    with _current_cancel_lock:
-        if _current_cancel is cancel:
-            _current_cancel = None
+def _task_terminal_writeback(record: TaskRecord) -> None:
+    """终态回写：completed / partial 落「请求 + 最终答案」到会话库。
+
+    FAILED 与叫停不落答案（主对话保持一问一答的连贯性，见 CONTEXT.md）；
+    答案带该任务实际的厂商/模型归属，导出与页面据此显示。
+    """
+    if record.status in ("completed", "partial") and record.answer:
+        session_store.append(record.session_id, "user", record.task)
+        session_store.append(
+            record.session_id,
+            "assistant",
+            record.answer,
+            status=record.status,
+            provider=record.provider or None,
+            model=record.model or None,
+        )
+    elif record.status == "failed":
+        session_store.append(
+            record.session_id,
+            "assistant",
+            f"任务失败：{record.reason}",
+            status="failed",
+        )
 
 
-def _agent_frames(
+def _start_task(
+    *,
+    session_id: str,
     task: str,
     provider: str | None,
     model: str | None,
     activated: tuple = (),
-) -> Iterator[str]:
-    """Agent 任务 SSE：思考逐字实时转发，动作/观察按步推送，终态带原因。
+) -> TaskRecord:
+    """登记并启动后台任务（审计日志逐事件落盘由 hub 负责）。"""
+    audit = TaskAuditLog(task, directory=audit_log_dir, session_id=session_id)
+    target = resolve_target(settings, provider, model)
+    try:
+        return task_hub.start(
+            session_id=session_id,
+            task=task,
+            runner=lambda cancel: agent_engine.run(
+                task, provider, model, activated=activated, cancel=cancel
+            ),
+            audit=audit,
+            on_terminal=_task_terminal_writeback,
+            provider=target.provider,
+            model=target.model,
+        )
+    except TaskBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    全事件落审计日志（logs/tasks/*.jsonl，含子 agent 轨迹，中断/叫停留痕）；
-    completed / partial 回写「请求 + 最终答案」到主对话；
-    activated 为 /技能名 显式点名的预激活技能；客户端断连兜底置取消标志。
+
+def _task_frames(record: TaskRecord, from_seq: int = 0) -> Iterator[str]:
+    """把任务事件流转成 SSE：先补发缺口，再转实时；断连即退订。
+
+    消费过慢导致积压超限时**不静默截断**：补一帧 truncated 告知客户端
+    从哪个序号重连（SPEC-0005 T5 的诚实语义）。
     """
-    cancel = CancelToken()
-    audit = TaskAuditLog(task, directory=audit_log_dir)
-    stream = agent_engine.run(
-        task, provider, model, activated=activated, cancel=cancel
+    yield _sse(
+        {
+            "type": "task_meta",
+            "task_id": record.task_id,
+            "session_id": record.session_id,
+            "task": record.task,
+        }
     )
-    _register_cancel(cancel)
-    answer: str | None = None
     try:
-        with _chat_lock:
-            for event in stream:
-                audit.record(event)
-                yield _sse(_agent_event_frame(event))
-                if isinstance(event, TaskFinished) and getattr(
-                    event, "role", "orchestrator"
-                ) == "orchestrator":
-                    answer = event.answer
-            if answer is not None:
-                conversation.add("user", task)
-                conversation.add("assistant", answer)
-    finally:
-        # 断连/异常兜底：置取消标志让在跑子 agent 在迭代边界退出，再收掉生成器
-        cancel.cancel()
-        close = getattr(stream, "close", None)
-        if close is not None:
-            close()
-        _unregister_cancel(cancel)
+        for seq, ts, event in record.subscribe(from_seq):
+            frame = _agent_event_frame(event)
+            frame["seq"] = seq
+            frame["ts"] = ts
+            frame["task_id"] = record.task_id
+            yield _sse(frame)
+    except SubscriberOverflow as exc:
+        yield _sse(
+            {
+                "type": "truncated",
+                "task_id": record.task_id,
+                "from_seq": exc.last_seq,
+                "detail": f"事件积压超出上限（{exc.reason}）："
+                f"请从 from_seq={exc.last_seq} 重连续流",
+            }
+        )
 
-
-@app.post("/agent/stream")
-def agent_stream(req: AgentRequest) -> StreamingResponse:
-    """Agent 任务 SSE 流。非 200 的配置错误在开流之前抛出；
-    引擎自身会把上游错误编码为 failed 帧，因此流内不会抛出异常。
-    """
+def _task_stream(
+    *,
+    session_id: str,
+    task: str,
+    provider: str | None,
+    model: str | None,
+    activated: tuple = (),
+    task_id: str | None = None,
+    from_seq: int = 0,
+) -> StreamingResponse:
+    """发起（或重连）任务流：非 200 的配置错误在开流之前抛出。"""
     try:
-        resolve_target(settings, req.provider, req.model)
+        resolve_target(settings, provider, model)
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if task_id:
+        record = task_hub.get(task_id)
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"未找到任务: {task_id}（进程可能已重启，任务不再可接续）",
+            )
+    else:
+        _reject_if_busy(session_id)
+        record = _start_task(
+            session_id=session_id,
+            task=task,
+            provider=provider,
+            model=model,
+            activated=activated,
+        )
     return StreamingResponse(
-        _agent_frames(req.task, req.provider, req.model),
+        _task_frames(record, from_seq),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
 
 
+@app.post("/agent/stream")
+def agent_stream(req: AgentRequest) -> StreamingResponse:
+    """Agent 任务 SSE 流（断连不取消；凭 task_id + from_seq 可重连续流）。"""
+    session_id = _resolve_session(req.session_id)
+    return _task_stream(
+        session_id=session_id,
+        task=req.task,
+        provider=req.provider,
+        model=req.model,
+        task_id=req.task_id,
+        from_seq=req.from_seq,
+    )
+
+
+@app.get("/agent/tasks/{task_id}")
+def task_status(task_id: str) -> dict:
+    """任务状态查询：供 UI 决定是否重连、从哪个序号接。"""
+    record = task_hub.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"未找到任务: {task_id}")
+    return {
+        "task_id": record.task_id,
+        "session_id": record.session_id,
+        "task": record.task,
+        "status": record.status,
+        "answer": record.answer,
+        "reason": record.reason,
+        "iterations": record.iterations,
+        "events": record.event_count,
+        "finished": record.finished,
+    }
+
+
+@app.get("/agent/tasks/{task_id}/stream")
+def task_reattach(task_id: str, from_seq: int = 0) -> StreamingResponse:
+    """重连续流：先补发 seq > from_seq 的历史事件，再转实时。"""
+    record = task_hub.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"未找到任务: {task_id}")
+    return StreamingResponse(
+        _task_frames(record, from_seq),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+class AgentStopRequest(BaseModel):
+    task_id: str | None = None
+    session_id: str | None = None
+
+
 @app.post("/agent/stop")
-def agent_stop() -> dict:
-    """叫停当前任务（含在跑子 agent）：置取消标志，任务以 partial 收尾。"""
-    with _current_cancel_lock:
-        cancel = _current_cancel
-    if cancel is None:
+def agent_stop(req: AgentStopRequest | None = None) -> dict:
+    """叫停任务：按 task_id 定位（缺省停该会话的在跑任务），以 partial 收尾。"""
+    if req is not None and req.task_id:
+        stopped = task_hub.stop(req.task_id)
+        return {
+            "status": "ok" if stopped else "idle",
+            "stopped": stopped,
+            "task_id": req.task_id,
+        }
+    if req is not None and req.session_id:
+        session_id = _resolve_session(req.session_id)
+        running = task_hub.running_task_id(session_id)
+        if running is None:
+            return {"status": "idle", "stopped": False}
+        return {
+            "status": "ok",
+            "stopped": task_hub.stop(running),
+            "task_id": running,
+        }
+    running = task_hub.running_tasks()
+    if not running:
         return {"status": "idle", "stopped": False}
-    cancel.cancel()
-    return {"status": "ok", "stopped": True}
+    for record in running:
+        record.cancel.cancel()
+    return {
+        "status": "ok",
+        "stopped": True,
+        "task_id": running[0].task_id,
+        "stopped_tasks": [record.task_id for record in running],
+    }
 
 
 # ---- MCP 管理面 ----
@@ -630,7 +1027,7 @@ class McpActionRequest(BaseModel):
 
 
 def _mcp_set_enabled(name: str, enabled: bool) -> dict:
-    with _chat_lock:
+    with _admin_lock:
         try:
             item = mcp_manager.set_enabled(name, enabled)
         except McpError as exc:
@@ -650,7 +1047,7 @@ def disable_mcp(req: McpActionRequest) -> dict:
 
 @app.post("/mcp/remove")
 def remove_mcp(req: McpActionRequest) -> dict:
-    with _chat_lock:
+    with _admin_lock:
         try:
             mcp_manager.remove(req.name)
         except McpError as exc:
@@ -660,7 +1057,7 @@ def remove_mcp(req: McpActionRequest) -> dict:
 
 @app.post("/mcp/reload")
 def reload_mcp() -> dict:
-    with _chat_lock:
+    with _admin_lock:
         errors = mcp_manager.reload()  # 先重载再取列表（dict 按序求值）
         return {
             "status": "ok",
@@ -672,7 +1069,7 @@ def reload_mcp() -> dict:
 @app.post("/mcp/reauth")
 def reauth_mcp(req: McpActionRequest) -> dict:
     """OAuth 重授权：清 token 并重连该服务（issue #44 管理面重授权入口）。"""
-    with _chat_lock:
+    with _admin_lock:
         try:
             item = mcp_manager.reauthorize(req.name)
         except McpError as exc:
@@ -695,7 +1092,7 @@ def install_mcp(req: McpInstallRequest) -> dict:
 
     密钥值写入 .env（连接定义只留 ${VAR} 占位）；mcpb 单文件包标「暂不支持」。
     """
-    with _chat_lock:
+    with _admin_lock:
         source = (req.source or "").strip().lower()
         if source == "catalog":
             if not req.catalog_id or not req.source_platform:
@@ -777,7 +1174,7 @@ def get_skill(name: str) -> dict:
 
 
 def _set_enabled(name: str, enabled: bool) -> dict:
-    with _chat_lock:
+    with _admin_lock:
         try:
             entry = skill_registry.set_enabled(name, enabled)
         except SkillError as exc:
@@ -797,7 +1194,7 @@ def disable_skill(name: str) -> dict:
 
 @app.delete("/skills/{name}")
 def delete_skill(name: str) -> dict:
-    with _chat_lock:
+    with _admin_lock:
         try:
             skill_registry.remove(name)
         except SkillError as exc:
@@ -1085,7 +1482,7 @@ def _install_from_catalog(req: InstallRequest) -> dict:
 def install_skill(req: InstallRequest) -> dict:
     """安装技能：目录包（经爬取服务）/ Git 适配器 / 本地目录导入。"""
     source = req.source.strip().lower()
-    with _chat_lock:
+    with _admin_lock:
         try:
             if source == "catalog":
                 if not req.catalog_id.strip():
@@ -1106,7 +1503,16 @@ def install_skill(req: InstallRequest) -> dict:
 
 
 if __name__ == "__main__":
+    import sys
+
     import uvicorn
 
+    # 启动即预热会话库：版本不匹配 / 被其他进程占用都在这里 fail loud
+    # （打印可读中文原因后退出，而不是甩一段 traceback）
+    try:
+        get_session_store()
+    except SessionStoreError as exc:
+        print(f"启动失败：{exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     _ensure_catalog_service()
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)

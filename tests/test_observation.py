@@ -17,7 +17,7 @@ from app.observation import (
 )
 from app.tools import Tool, ToolRegistry
 
-from tests.fakes import FakeLLMClient, text_round, tool_round
+from tests.fakes import FakeLLMClient, SessionStoreMixin, text_round, tool_round
 
 FULL = "0123456789" * 5000  # 50000 字符
 
@@ -157,7 +157,7 @@ class ResultPoolEvictionTest(unittest.TestCase):
         self.assertIn("失效", str(ctx.exception))
 
 
-class ChatReadMoreTest(unittest.TestCase):
+class ChatReadMoreTest(SessionStoreMixin, unittest.TestCase):
     """聊天通道：视图 + 续读全链路（技能依赖工具触发大结果）。"""
 
     def setUp(self):
@@ -175,7 +175,7 @@ class ChatReadMoreTest(unittest.TestCase):
             server.mcp_manager,
         )
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self._tmp = tempfile.TemporaryDirectory()
         (
             server.tool_registry,
@@ -199,7 +199,6 @@ class ChatReadMoreTest(unittest.TestCase):
         ).TestClient(server.app)
 
     def tearDown(self):
-        self.server.conversation.reset()
         (
             self.server.settings,
             self.server.llm,
@@ -210,6 +209,7 @@ class ChatReadMoreTest(unittest.TestCase):
             self.server.mcp_manager,
         ) = self._orig
         self._tmp.cleanup()
+        self.teardown_session_store()
 
     def frames(self, response):
         result = []

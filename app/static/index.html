@@ -271,9 +271,7 @@
     <button id="clear-btn" title="清空服务端对话上下文并清屏">清空</button>
   </header>
 
-  <div id="chat">
-    <div class="msg assistant"><div class="bubble">你好！我是 multiagent，输入消息开始对话；输入 / 可快速点名技能。</div></div>
-  </div>
+  <div id="chat"></div>
 
   <div id="skills-view">
     <div class="sub-tabs">
@@ -377,6 +375,81 @@ const skillsViewEl = document.getElementById('skills-view');
 const slashPopEl = document.getElementById('slash-pop');
 let busy = false;
 let toastTimer = null;
+
+// ===== 会话（SPEC-0005）：历史权威副本在服务端，页面按 URL 恢复 =====
+// URL 带 ?session=<id> 就进入该会话；不带则空页面，用户首条消息时即时建会话。
+let sessionId = new URLSearchParams(location.search).get('session') || '';
+
+function setSessionId(id) {
+  sessionId = id || '';
+  const url = sessionId ? location.pathname + '?session=' + encodeURIComponent(sessionId)
+    : location.pathname;
+  history.replaceState(null, '', url);
+}
+
+function withSession(body) {
+  if (sessionId) body.session_id = sessionId;
+  return body;
+}
+
+// 页面加载时把服务端历史重放进 DOM（不引入前端数据模型，导出按钮照旧遍历 DOM）
+async function restoreSession() {
+  if (!sessionId) {
+    addMessage('assistant', '你好！我是 multiagent。发送第一条消息即创建会话；输入 / 可快速点名技能。');
+    return;
+  }
+  let payload = null;
+  try {
+    const res = await fetch('/sessions/' + encodeURIComponent(sessionId) + '/messages');
+    if (res.ok) payload = await res.json();
+  } catch (e) { /* 服务不可用时静默，页面保持空 */ }
+  if (!payload) {
+    addMessage('error', '会话加载失败：' + sessionId);
+    return;
+  }
+  chatEl.innerHTML = '';
+  for (const message of payload.messages || []) {
+    replayMessage(message);
+  }
+  if (!(payload.messages || []).length) {
+    addMessage('assistant', '（空会话）发送第一条消息开始。');
+  }
+  // 有任务在跑则接回实时流（断连续流，SPEC-0005 T5）
+  resumeRunningTask();
+}
+
+function replayMessage(message) {
+  if (message.role === 'user') {
+    addMessage('user', message.content);
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant' + (message.status === 'failed' ? ' error' : '');
+  if (message.reasoning) {
+    const thought = document.createElement('div');
+    thought.className = 'bubble thought';
+    thought.textContent = message.reasoning;
+    wrap.appendChild(thought);
+  }
+  for (const step of message.steps || []) {
+    const el = document.createElement('div');
+    if (step.type === 'action') {
+      el.className = 'bubble act';
+      el.textContent = '→ ' + step.tool + '(' + JSON.stringify(step.arguments) + ')';
+    } else {
+      el.className = 'bubble obs' + (step.is_error ? ' error' : '');
+      el.textContent = step.text;
+    }
+    wrap.appendChild(el);
+  }
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = message.content;
+  wrap.appendChild(bubble);
+  if (message.provider) addMeta(wrap, message.provider + ' / ' + message.model);
+  chatEl.appendChild(wrap);
+  scrollToBottom();
+}
 
 function toast(text) {
   let el = document.getElementById('toast');
@@ -638,6 +711,20 @@ async function send() {
   const text = inputEl.value.trim();
   if (!text || busy) return;
   hideSlashPop();
+  // 空页面（无 ?session=）时首条消息即时建会话并改写 URL（SPEC-0005 Q6）
+  // 会话名由服务端按首条消息生成（命名规则只在 app/sessions.py 一处）
+  if (!sessionId) {
+    try {
+      const res = await fetch('/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.session_id) setSessionId(data.session_id);
+      chatEl.innerHTML = '';
+    } catch (e) { /* 建会话失败则退回默认会话（服务端兜底） */ }
+  }
   busy = true;
   sendBtn.disabled = true;
   taskBtn.disabled = true;
@@ -647,7 +734,7 @@ async function send() {
   addMessage('user', text);
 
   const typing = addTyping();
-  const body = { message: text };
+  const body = withSession({ message: text });
   if (providerEl.value) body.provider = providerEl.value;
   try {
     const res = await fetch('/chat/stream', {
@@ -683,14 +770,15 @@ async function send() {
       return bubble;
     };
     for await (const evt of readSse(res.body)) {
-      if (!task && evt.type === 'task_started') {
+      if (evt.type === 'task_meta') {
         // /技能名 前缀路由：服务端升级为任务通道，按时间线渲染（多 Agent 树）
         task = makeTaskTimeline('技能任务 > ' + text);
-        task.handle(evt);
+        runningTask = { taskId: evt.task_id, lastSeq: 0, timeline: task };
+        handleTaskFrame(evt);
         continue;
       }
       if (task) {
-        task.handle(evt);
+        handleTaskFrame(evt);
         continue;
       }
       if (evt.type === 'reasoning_delta') {
@@ -725,10 +813,17 @@ async function send() {
     }
     if (!task && bubble && !bubble.textContent) bubble.textContent = '（空回复）';
     scrollToBottom();
+    // 服务端报告事件被截断（技能任务）时从缺口接回
+    if (task && runningTask && runningTask.needsReconnect) {
+      await drainTaskStream(null, task);
+    }
   } catch (e) {
     typing.remove();
     addMessage('error', '网络错误：' + e.message);
   } finally {
+    // 清掉任务态：否则 /技能名 任务结束后残留的 runningTask 会让停止按钮
+    // 指向已结束的 task_id，且下一个任务的 seq 从 1 重来时被去重逻辑全丢
+    runningTask = null;
     busy = false;
     sendBtn.disabled = false;
     taskBtn.disabled = false;
@@ -737,10 +832,113 @@ async function send() {
   }
 }
 
+// ===== 任务流：新任务与重连续流共用一条读取回路（SPEC-0005 T1/T5） =====
+// 断连 = 退订，服务端任务照跑；重连时带上 task_id 与已收最大 seq，缺口由服务端补发。
+let runningTask = null;   // { taskId, lastSeq, timeline }
+
+function handleTaskFrame(evt) {
+  if (evt.type === 'task_meta') {
+    if (runningTask) runningTask.taskId = evt.task_id;
+    return;
+  }
+  if (evt.type === 'truncated') {
+    // 服务端明确告知事件被截断：标记后由 consumeTaskStream 从缺口重连
+    if (runningTask) {
+      runningTask.lastSeq = evt.from_seq || runningTask.lastSeq;
+      runningTask.needsReconnect = true;
+    }
+    return;
+  }
+  if (typeof evt.seq === 'number') {
+    if (runningTask) {
+      if (evt.seq <= runningTask.lastSeq) return;  // 补发段与实时段的重叠去重
+      runningTask.lastSeq = evt.seq;
+    }
+  }
+  if (runningTask) runningTask.timeline.handle(evt);
+}
+
+async function consumeTaskStream(res, timeline) {
+  for await (const evt of readSse(res.body)) {
+    handleTaskFrame(evt);
+  }
+}
+
+// 读一条任务流；若服务端报告事件被截断，从缺口处重连（最多几次，防死循环）。
+// first = { url, options } 描述首条流（发起任务用 POST，重连用 GET）；
+// 传 null 表示首条流已被调用方消费完，直接从缺口重连。
+async function drainTaskStream(first, timeline) {
+  let pending = first;
+  let attempts = 0;
+  while (true) {
+    if (pending) {
+      const res = await fetch(pending.url, pending.options);
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => null);
+        const detail = typeof (err && err.detail) === 'string'
+          ? err.detail : 'HTTP ' + res.status;
+        timeline.addStep('failed', '出错了：' + detail);
+        return;
+      }
+      await consumeTaskStream(res, timeline);
+    }
+    if (!runningTask || !runningTask.needsReconnect) return;
+    if (++attempts > 5) {
+      timeline.addStep('failed', '事件积压反复出现，已放弃自动重连；请刷新页面重试');
+      return;
+    }
+    runningTask.needsReconnect = false;
+    pending = {
+      url: '/agent/tasks/' + encodeURIComponent(runningTask.taskId)
+        + '/stream?from_seq=' + runningTask.lastSeq,
+    };
+  }
+}
+
+// 页面加载时若本会话有任务在跑，接回实时流（否则刷新即与任务失联）
+async function resumeRunningTask() {
+  if (!sessionId) return;
+  let taskId = null;
+  try {
+    const res = await fetch('/sessions');
+    const data = await res.json();
+    const entry = (data.sessions || []).find((s) => s.id === sessionId);
+    taskId = entry && entry.running_task_id;
+  } catch (e) { /* 服务不可用则跳过 */ }
+  if (!taskId) return;
+  const timeline = makeTaskTimeline('任务（重连中…）');
+  runningTask = { taskId, lastSeq: 0, timeline };
+  toast('正在接回在跑的任务…');
+  try {
+    await drainTaskStream(
+      {
+        url: '/agent/tasks/' + encodeURIComponent(taskId) + '/stream?from_seq=0',
+      },
+      timeline,
+    );
+  } catch (e) {
+    timeline.addStep('failed', '重连失败：' + e.message);
+  } finally {
+    runningTask = null;
+  }
+}
+
 async function runAgent() {
   const text = inputEl.value.trim();
   if (!text || busy) return;
   hideSlashPop();
+  if (!sessionId) {
+    try {
+      const res = await fetch('/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.session_id) setSessionId(data.session_id);
+      chatEl.innerHTML = '';
+    } catch (e) { /* 退回默认会话 */ }
+  }
   busy = true;
   sendBtn.disabled = true;
   taskBtn.disabled = true;
@@ -748,30 +946,29 @@ async function runAgent() {
   inputEl.value = '';
   inputEl.style.height = '46px';
 
-  const body = { task: text };
+  const body = withSession({ task: text });
   if (providerEl.value) body.provider = providerEl.value;
 
-  const task = makeTaskTimeline('任务 > ' + text);
+  const timeline = makeTaskTimeline('任务 > ' + text);
+  runningTask = { taskId: null, lastSeq: 0, timeline };
 
   try {
-    const res = await fetch('/agent/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok || !res.body) {
-      const err = await res.json().catch(() => null);
-      const detail = typeof (err && err.detail) === 'string'
-        ? err.detail : 'HTTP ' + res.status;
-      task.addStep('failed', '出错了：' + detail);
-      return;
-    }
-    for await (const evt of readSse(res.body)) {
-      task.handle(evt);
-    }
+    await drainTaskStream(
+      {
+        url: '/agent/stream',
+        options: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      },
+      timeline,
+    );
   } catch (e) {
-    task.addStep('failed', '网络错误：' + e.message);
+    // 网络中断：任务仍在服务端跑，提示可刷新接回（不谎报任务失败）
+    timeline.addStep('failed', '连接中断（任务仍在服务端运行，刷新页面可接回）：' + e.message);
   } finally {
+    runningTask = null;
     busy = false;
     sendBtn.disabled = false;
     taskBtn.disabled = false;
@@ -781,9 +978,17 @@ async function runAgent() {
 }
 
 async function clearChat() {
-  try { await fetch('/reset', { method: 'POST' }); } catch (e) { /* 忽略 */ }
+  // 「清空」= 新建一段对话：旧会话留在列表里，不销毁任何记录（SPEC-0005 Q6）
+  try {
+    const res = await fetch('/reset', { method: 'POST' });
+    const data = await res.json();
+    setSessionId(data.session_id || '');
+  } catch (e) {
+    toast('新建会话失败：' + e.message);
+    return;
+  }
   chatEl.innerHTML = '';
-  addMessage('assistant', '已清空对话上下文。');
+  addMessage('assistant', '已开始新会话（旧记录仍可在会话列表中找回）。');
 }
 
 // 把页面上可见的完整会话（含思考块、任务轨迹、错误提示）组织成 Markdown，
@@ -1672,9 +1877,16 @@ async function confirmInstall() {
 sendBtn.addEventListener('click', send);
 taskBtn.addEventListener('click', runAgent);
 stopBtn.addEventListener('click', async () => {
-  // 叫停当前任务（含在跑子 agent）：任务以 partial 收尾并展示已有进展
+  // 叫停任务：按 task_id 定位（在跑的任务才有 id），以 partial 收尾并展示已有进展
   try {
-    const res = await fetch('/agent/stop', { method: 'POST' });
+    const body = runningTask && runningTask.taskId
+      ? { task_id: runningTask.taskId }
+      : (sessionId ? { session_id: sessionId } : {});
+    const res = await fetch('/agent/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
     const data = await res.json();
     toast(data.stopped ? '已请求叫停，任务将带着已有进展收尾' : '当前没有正在运行的任务');
   } catch (e) {
@@ -1778,6 +1990,7 @@ inputEl.addEventListener('input', () => {
 inputEl.addEventListener('blur', () => setTimeout(hideSlashPop, 150));
 
 loadProviders();
+restoreSession();
 inputEl.focus();
 </script>
 </body>

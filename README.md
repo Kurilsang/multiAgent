@@ -58,7 +58,7 @@ Windows 下也可以直接双击 **`run.bat`**：首次运行自动创建虚拟�
 | `/model <name>` | 切换厂商（deepseek / glm / minimax） |
 | `/agent <任务>` | 发起自主多步任务（ReAct 循环，完成后答案回写主对话） |
 | `/export [路径]` | 导出对话记录为 Markdown（缺省写到当前目录，可直接粘贴给 AI 排障） |
-| `/reset` | 清空对话上下文 |
+| `/reset` | 清空对话上下文（CLI 仍是进程内单会话） |
 | `/help` | 帮助 |
 | `/exit` | 退出 |
 
@@ -129,12 +129,24 @@ curl -X POST http://127.0.0.1:8000/mcp/install \
   -H "Content-Type: application/json" \
   -d '{"source": "local", "path": "D:/mcp-import/servers.json"}'
 
-# 导出主对话历史（?format=json 可选，默认 markdown）
+# 导出主对话历史（?format=json 可选，默认 markdown；?session_id= 指定会话）
 curl http://127.0.0.1:8000/export
 curl "http://127.0.0.1:8000/export?format=json"
+curl "http://127.0.0.1:8000/export?session_id=<会话id>"
 
-# 清空对话上下文
+# 会话（持久化在 SESSION_DB，重启后仍在）
+curl http://127.0.0.1:8000/sessions
+curl -X POST http://127.0.0.1:8000/sessions -H "Content-Type: application/json" -d '{"name": "新会话"}'
+curl http://127.0.0.1:8000/sessions/<会话id>/messages
+curl -X POST http://127.0.0.1:8000/sessions/<会话id>/rename -H "Content-Type: application/json" -d '{"name": "改名"}'
+curl -X DELETE http://127.0.0.1:8000/sessions/<会话id>
+
+# 新建一段对话（不再销毁旧记录：旧会话留在列表里）
 curl -X POST http://127.0.0.1:8000/reset
+
+# 任务状态与重连续流（断连后凭 task_id + from_seq 接回）
+curl http://127.0.0.1:8000/agent/tasks/<任务id>
+curl "http://127.0.0.1:8000/agent/tasks/<任务id>/stream?from_seq=0"
 
 # 健康检查（app 字段为服务身份标识，run.bat 靠它识别端口占用者）/ 厂商状态
 curl http://127.0.0.1:8000/health
@@ -210,6 +222,8 @@ tests/
 
 MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`MCP_TOKEN_FILE` 为 OAuth token 文件（默认 `mcp/tokens.json`，`auth: oauth` 服务的授权产物：权限收紧、不入库、不进 `.env` 明文）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）。
 
+会话持久化：`SESSION_DB` 指定会话库路径（默认 `data/sessions.db`，相对项目根，见 [docs/specs/0005-session-persistence.md](docs/specs/0005-session-persistence.md)）。主对话历史与会话元数据落在这里，服务重启后仍在；与审计日志分开存放（会话是一等状态，`logs/` 是可丢弃留痕）。`data/` 已被 `.gitignore` 忽略。库版本高于代码版本、或被另一活进程占用时，启动会打印中文原因并退出。
+
 如需按厂商覆盖接入端点，设置 `<厂商>_BASE_URL`（如 `GLM_BASE_URL`）。典型场景：GLM Coding Plan 套餐 Key 只对编码专用端点生效，需设置 `GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`，否则标准端点会报 1113 余额不足。
 
 ## 三厂商 function calling 冒烟
@@ -233,16 +247,22 @@ python -m unittest discover tests -v
 
 ## 已知范围限制
 
-- 单会话内存上下文：服务重启后历史与任务轨迹清空（审计日志落盘可回看、不提供恢复）；接口内部已加锁串行化，适合单用户/低并发使用
+- 会话历史持久化在 `SESSION_DB`（默认 `data/sessions.db`，已 gitignore）：服务重启后主对话与任务轨迹都还在；**页面展示全量历史、发给模型仍按 `MAX_CONTEXT_MESSAGES` 截断**（长会话的上下文仍是短板，自动摘要未做）
+- **不做「进程重启后续跑同一任务」**：重启后一切可见、可回看、可重跑，但不续跑——那需要工具副作用幂等性与 MCP 会话/厂商流等不可恢复资源的重建语义。（「已中断」标注与「重跑」按钮属 #58 任务归属与轨迹回放，尚未落地）
+- 单进程边界：检测到另一活进程占用同一会话库会拒绝启动（心跳 + pid 存活判定）；不做多进程部署与跨进程任务广播。停机时置取消并最多等 5 秒让在跑任务收尾（任务线程是守护线程，超时即随进程退出）
+- 会话列表接口（`GET /sessions`）已就位，但 WebUI 的会话侧栏（切换/重命名/删除入口）属 #57，尚未落地——当前只能靠 URL 的 `?session=<id>` 切换会话
 - 多 Agent 编排为一层深度（子 agent 不能再派发）；critic 默认开启 = 每任务多一次审查调用、最多一次整体重跑（`AGENT_CRITIC_ENABLED=0` 可关）；MCP 工具不随派发默认下放，需编排器显式点名
 - MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；密钥支持静态 env/header（`${VAR}` 占位 + `.env`，推荐长期 PAT）与 `auth: oauth` 动态授权流（授权码 + PKCE 终端贴码 / 无头设备码；token 存 `MCP_TOKEN_FILE` 独立文件、过期自动刷新，刷新失败降级为连接错误提示重新授权；OAuth 首次授权在装配期终端交互完成，无浏览器自助重定向服务）；mcpb 单文件包条目暂不支持安装（后续扩展点）；官方 MCP Registry 处于 preview 阶段（schema 可能变更），默认翻到游标耗尽（2000 页硬上限防失控）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令（确认卡已披露命令原文）
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
-- SSE 断连后任务不恢复，页面重开需重新发起
+- CLI 仍为进程内单会话，**不读写** WebUI 的会话库（两条入口的历史互不相干）
+- 旁存续读句柄池不落盘：重启后轨迹里「续读某句柄」的调用无法满足，UI/错误信息如实说明
 
 ## 后续规划
 
 - MCP 市场后续扩展：mcpb 单文件包下载安装、ClawHub 适配器、已验证源免确认白名单；`/` 技能弹层混入在线目录
 - 技能平台原生搜索与在线浏览（skills.sh / ClawHub / LobeHub API）、zip 上传、版本与更新检查
-- 多会话管理与持久化
+- 多会话管理增强：会话保留策略与自动清理、会话导入/导出为可移植格式
+- 任务恢复增强：工具副作用幂等性契约 + 进程重启后从审计日志续跑同一任务
+- 基于持久化历史的自动摘要压缩（长会话上下文短板）
 - 网关特化逻辑（路由、鉴权、审计）

@@ -26,17 +26,25 @@ def new_task_id() -> str:
 class TaskAuditLog:
     """一次任务的审计日志写入器：首行任务头，随后逐行一个引擎事件。"""
 
-    def __init__(self, task: str, directory: Path | None = None, now: datetime | None = None):
+    def __init__(
+        self,
+        task: str,
+        directory: Path | None = None,
+        now: datetime | None = None,
+        session_id: str = "",
+    ):
         self.task_id = new_task_id()
         stamp = (now or datetime.now()).strftime("%Y%m%dT%H%M%S")
         self.directory = Path(directory) if directory is not None else DEFAULT_TASK_LOG_DIR
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / f"{stamp}-{self.task_id}.jsonl"
+        self.session_id = session_id
         header = {
             "type": HEADER_TYPE,
             "ts": (now or datetime.now()).isoformat(timespec="seconds"),
             "task_id": self.task_id,
             "task": task,
+            "session_id": session_id,
         }
         self._write(header)
 
@@ -74,6 +82,7 @@ def read_task_logs(directory: Path | None = None) -> list[dict]:
                 current = {
                     "task_id": payload.get("task_id", ""),
                     "task": payload.get("task", ""),
+                    "session_id": payload.get("session_id", ""),
                     "events": [],
                 }
                 tasks.append(current)

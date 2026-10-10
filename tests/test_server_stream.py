@@ -6,6 +6,7 @@
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from app.agent import (
 from app.audit import TaskAuditLog, read_task_logs
 from app.llm import LLMError, ReasoningDelta, TextDelta
 
-from tests.fakes import FakeLLMClient, text_round, tool_round
+from tests.fakes import FakeLLMClient, SessionStoreMixin, text_round, tool_round
 
 
 class FakeStreamLLM:
@@ -64,6 +65,8 @@ class StubSettings:
     catalog_base_url = "http://catalog.test"
     mcp_max_tools = 64
     observation_max_chars = 4000
+    max_context_messages = 20
+    session_db = "data/sessions.db"
 
     def api_key_for(self, provider: str) -> str:
         return "test-key"
@@ -81,18 +84,18 @@ class FakeAgentEngine:
         yield from self.events
 
 
-class ChatStreamTest(unittest.TestCase):
+class ChatStreamTest(SessionStoreMixin, unittest.TestCase):
     def setUp(self):
         self._orig_llm = server.llm
         self._orig_settings = server.settings
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         server.llm = self._orig_llm
         server.settings = self._orig_settings
+        self.teardown_session_store()
 
     def _parse_frames(self, response) -> list[dict]:
         frames = []
@@ -115,8 +118,8 @@ class ChatStreamTest(unittest.TestCase):
         self.assertEqual(frames[1], {"type": "delta", "text": "好"})
         self.assertEqual(frames[2]["type"], "done")
         self.assertEqual(frames[2]["provider"], "glm")
-        # 任务结束后「请求 + 回复」回写主对话
-        self.assertEqual(len(server.conversation), 2)
+        # 任务结束后「请求 + 回复」落会话库
+        self.assertEqual(len(self.session_messages()), 2)
 
     def test_reasoning_forwarded_but_not_stored(self):
         """思考链以 reasoning_delta 帧透传展示，主对话只保留正式回复。"""
@@ -133,12 +136,13 @@ class ChatStreamTest(unittest.TestCase):
             ],
         )
         self.assertEqual(frames[-1]["type"], "done")
-        messages = server.conversation.messages_for_api()
-        self.assertEqual(
-            [m["content"] for m in messages], ["hi", "答案"]
-        )
+        # 思考链与正式回复都落库（刷新后与实时页一致）
+        messages = self.session_messages()
+        self.assertEqual([m["content"] for m in messages], ["hi", "答案"])
+        self.assertEqual(messages[1]["reasoning"], "我先想一想")
 
-    def test_llm_error_emits_error_frame_and_rolls_back(self):
+    def test_llm_error_emits_error_frame_and_records_failure(self):
+        """失败留痕不回滚：用户消息与失败标记都在（SPEC-0005 Q7）。"""
         server.llm = FakeErrorLLM(LLMError("上游 500"))
         with self.client.stream(
             "POST", "/chat/stream", json={"message": "hi"}
@@ -147,14 +151,17 @@ class ChatStreamTest(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0]["type"], "error")
         self.assertIn("上游 500", frames[0]["detail"])
-        self.assertEqual(len(server.conversation), 0)
+        messages = self.session_messages()
+        self.assertEqual(messages[0]["content"], "hi")
+        self.assertEqual(messages[1]["status"], "failed")
+        self.assertIn("上游 500", messages[1]["content"])
 
     def test_blank_message_rejected(self):
         resp = self.client.post("/chat/stream", json={"message": "   "})
         self.assertEqual(resp.status_code, 422)
 
 
-class AgentStreamTest(unittest.TestCase):
+class AgentStreamTest(SessionStoreMixin, unittest.TestCase):
     def setUp(self):
         self._orig_engine = server.agent_engine
         self._orig_settings = server.settings
@@ -162,15 +169,15 @@ class AgentStreamTest(unittest.TestCase):
         self._audit_tmp = tempfile.TemporaryDirectory()
         server.audit_log_dir = Path(self._audit_tmp.name)
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         server.agent_engine = self._orig_engine
         server.settings = self._orig_settings
         server.audit_log_dir = self._orig_audit_dir
         self._audit_tmp.cleanup()
+        self.teardown_session_store()
 
     def _parse_frames(self, response) -> list[dict]:
         frames = []
@@ -178,6 +185,21 @@ class AgentStreamTest(unittest.TestCase):
             if line.startswith("data: "):
                 frames.append(json.loads(line[len("data: ") :]))
         return frames
+
+    @staticmethod
+    def _strip_meta(frames: list[dict]) -> list[dict]:
+        """去掉 task_meta 与每帧附加的 seq/ts/task_id，回到事件本身的形状。"""
+        out = []
+        for frame in frames:
+            if frame.get("type") == "task_meta":
+                continue
+            frame = {
+                k: v
+                for k, v in frame.items()
+                if k not in ("seq", "ts", "task_id")
+            }
+            out.append(frame)
+        return out
 
     def test_agent_stream_emits_step_frames(self):
         server.agent_engine = FakeAgentEngine(
@@ -194,8 +216,11 @@ class AgentStreamTest(unittest.TestCase):
             "POST", "/agent/stream", json={"task": "现在几点"}
         ) as resp:
             frames = self._parse_frames(resp)
+        # 首帧是任务标识（重连续流的凭据），其后是事件帧
+        self.assertEqual(frames[0]["type"], "task_meta")
+        self.assertTrue(frames[0]["task_id"])
         self.assertEqual(
-            frames,
+            self._strip_meta(frames),
             [
                 {"type": "task_started"},
                 {"type": "thought_delta", "text": "我需要"},
@@ -215,11 +240,13 @@ class AgentStreamTest(unittest.TestCase):
                 },
             ],
         )
-        # 任务结束后「请求 + 最终答案」回写主对话（与 CLI 路径一致）
-        self.assertEqual(len(server.conversation), 2)
-        messages = server.conversation.messages_for_api()
-        self.assertEqual(messages[0]["content"], "现在几点")
-        self.assertEqual(messages[1]["content"], "今天是星期一")
+        # 事件带单调序号（重连补发的依据）
+        seqs = [f["seq"] for f in frames if f.get("type") != "task_meta"]
+        self.assertEqual(seqs, sorted(seqs))
+        self.assertEqual(len(set(seqs)), len(seqs))
+        # 任务结束后「请求 + 最终答案」落会话库（与 CLI 路径一致）
+        contents = self.session_contents()
+        self.assertEqual(contents, ["现在几点", "今天是星期一"])
 
     def test_agent_stream_emits_failed_frame(self):
         server.agent_engine = FakeAgentEngine(
@@ -230,17 +257,19 @@ class AgentStreamTest(unittest.TestCase):
         ) as resp:
             frames = self._parse_frames(resp)
         self.assertEqual(
-            frames[-1], {"type": "failed", "reason": "死循环", "iterations": 3}
+            self._strip_meta(frames)[-1],
+            {"type": "failed", "reason": "死循环", "iterations": 3},
         )
-        # 失败的任务不回写主对话
-        self.assertEqual(len(server.conversation), 0)
+        # 失败不落最终答案，但留痕可见
+        messages = self.session_messages()
+        self.assertEqual(messages[-1]["status"], "failed")
 
     def test_blank_task_rejected(self):
         resp = self.client.post("/agent/stream", json={"task": "   "})
         self.assertEqual(resp.status_code, 422)
 
 
-class MultiAgentFrameTest(unittest.TestCase):
+class MultiAgentFrameTest(SessionStoreMixin, unittest.TestCase):
     """多 Agent 帧：子 agent 事件附身份字段，根 agent 帧保持向后兼容。"""
 
     def setUp(self):
@@ -250,15 +279,15 @@ class MultiAgentFrameTest(unittest.TestCase):
         self._audit_tmp = tempfile.TemporaryDirectory()
         server.audit_log_dir = Path(self._audit_tmp.name)
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         server.agent_engine = self._orig_engine
         server.settings = self._orig_settings
         server.audit_log_dir = self._orig_audit_dir
         self._audit_tmp.cleanup()
+        self.teardown_session_store()
 
     def _parse_frames(self, response) -> list[dict]:
         frames = []
@@ -301,17 +330,17 @@ class MultiAgentFrameTest(unittest.TestCase):
             "POST", "/agent/stream", json={"task": "主任务"}
         ) as resp:
             frames = self._parse_frames(resp)
-        self.assertEqual(frames[0], {"type": "task_started"})
-        self.assertEqual(frames[1]["type"], "task_started")
-        self.assertEqual(frames[1]["agent_id"], "sub-1")
-        self.assertEqual(frames[1]["agent_name"], "子任务1")
-        self.assertEqual(frames[1]["role"], "worker")
-        self.assertEqual(frames[1]["parent_id"], "main")
-        self.assertEqual(frames[4]["type"], "final")
-        self.assertNotIn("agent_id", frames[4])
+        events = AgentStreamTest._strip_meta(frames)
+        self.assertEqual(events[0], {"type": "task_started"})
+        self.assertEqual(events[1]["type"], "task_started")
+        self.assertEqual(events[1]["agent_id"], "sub-1")
+        self.assertEqual(events[1]["agent_name"], "子任务1")
+        self.assertEqual(events[1]["role"], "worker")
+        self.assertEqual(events[1]["parent_id"], "main")
+        self.assertEqual(events[4]["type"], "final")
+        self.assertNotIn("agent_id", events[4])
         # 回写以编排器终态为准（子 agent 的 final 不回写）
-        self.assertEqual(len(server.conversation), 2)
-        self.assertEqual(server.conversation.messages_for_api()[1]["content"], "总答案")
+        self.assertEqual(self.session_contents(), ["主任务", "总答案"])
 
     def test_events_recorded_to_audit_log(self):
         server.agent_engine = FakeAgentEngine(
@@ -325,36 +354,76 @@ class MultiAgentFrameTest(unittest.TestCase):
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["task"], "任务X")
         self.assertEqual(len(logs[0]["events"]), 2)
+        # 审计头记录会话归属（SPEC-0005 T4）
+        self.assertEqual(logs[0]["session_id"], "default")
 
 
-class AgentStopTest(unittest.TestCase):
-    """/agent/stop：置当前任务取消标志（单会话单任务语义）。"""
+class AgentStopTest(SessionStoreMixin, unittest.TestCase):
+    """/agent/stop：按 task_id 定位（不再依赖「单会话单任务」前提）。"""
 
     def setUp(self):
         self._orig_settings = server.settings
         server.settings = StubSettings()
+        self.setup_session_store()
         self.client = TestClient(server.app)
 
     def tearDown(self):
         server.settings = self._orig_settings
+        self.teardown_session_store()
 
     def test_stop_without_running_task_reports_idle(self):
         resp = self.client.post("/agent/stop")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"status": "idle", "stopped": False})
 
-    def test_stop_cancels_registered_token(self):
-        cancel = CancelToken()
-        server._register_cancel(cancel)
+    def test_stop_by_task_id_cancels_that_task(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def runner(cancel):
+            yield TaskStarted(task="长任务")
+            started.set()
+            release.wait(timeout=5)
+            yield TaskFinished(status="partial", answer="停在这里", iterations=1)
+
+        record = server.task_hub.start(
+            session_id="default", task="长任务", runner=runner
+        )
+        self.assertTrue(started.wait(timeout=5))
         try:
-            resp = self.client.post("/agent/stop")
-            self.assertEqual(resp.json(), {"status": "ok", "stopped": True})
-            self.assertTrue(cancel.cancelled)
+            resp = self.client.post("/agent/stop", json={"task_id": record.task_id})
+            self.assertEqual(resp.json()["stopped"], True)
+            self.assertTrue(record.cancel.cancelled)
         finally:
-            server._unregister_cancel(cancel)
+            release.set()
+
+    def test_stop_by_session_stops_its_running_task(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def runner(cancel):
+            yield TaskStarted(task="会话任务")
+            started.set()
+            release.wait(timeout=5)
+            yield TaskFinished(status="partial", answer="停", iterations=1)
+
+        record = server.task_hub.start(
+            session_id="default", task="会话任务", runner=runner
+        )
+        self.assertTrue(started.wait(timeout=5))
+        try:
+            resp = self.client.post("/agent/stop", json={"session_id": "default"})
+            self.assertEqual(resp.json()["task_id"], record.task_id)
+            self.assertTrue(record.cancel.cancelled)
+        finally:
+            release.set()
+
+    def test_unknown_task_id_reports_idle(self):
+        resp = self.client.post("/agent/stop", json={"task_id": "nope"})
+        self.assertEqual(resp.json(), {"status": "idle", "stopped": False, "task_id": "nope"})
 
 
-class WiringSwapMixin:
+class WiringSwapMixin(SessionStoreMixin):
     """把整套技能装配换到临时目录（测试间互不污染，可安全热重载）。"""
 
     def setUp(self):
@@ -369,7 +438,7 @@ class WiringSwapMixin:
             server.audit_log_dir,
         )
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self._tmp = tempfile.TemporaryDirectory()
         server.audit_log_dir = Path(self._tmp.name)
         server.llm = FakeLLMClient([])
@@ -383,7 +452,6 @@ class WiringSwapMixin:
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         (
             server.llm,
             server.settings,
@@ -395,6 +463,7 @@ class WiringSwapMixin:
             server.audit_log_dir,
         ) = self._orig
         self._tmp.cleanup()
+        self.teardown_session_store()
 
     def _parse_frames(self, response) -> list[dict]:
         frames = []
@@ -425,11 +494,10 @@ class ChatSkillLoopTest(WiringSwapMixin, unittest.TestCase):
         # 第二轮把激活技能声明的 calculator 加入了工具集
         second_tools = {t["function"]["name"] for t in fake.calls[1][1]}
         self.assertIn("calculator", second_tools)
-        # 仅最终文本入主对话，技能正文与工具中间态不落历史
-        self.assertEqual(
-            [m["content"] for m in server.conversation.messages_for_api()],
-            ["3 天后是几号", "答案是周三"],
-        )
+        # 最终文本 + 工具轮次都落库（刷新后与实时页一致，SPEC-0005 Q7）
+        self.assertEqual(self.session_contents(), ["3 天后是几号", "答案是周三"])
+        steps = self.session_messages()[1]["steps"]
+        self.assertEqual([s["type"] for s in steps], ["action", "observation"])
 
     def test_unactivated_dependency_tool_rejected(self):
         server.skill_registry.create("时间报告", "日期推算", "先取时间", ("calculator",))
@@ -457,7 +525,10 @@ class ChatSkillLoopTest(WiringSwapMixin, unittest.TestCase):
             frames = self._parse_frames(resp)
         self.assertEqual(frames[-1]["type"], "error")
         self.assertIn("上限", frames[-1]["detail"])
-        self.assertEqual(len(server.conversation), 0)
+        # 超限留痕（不回滚）：用户消息在，且该轮标记为失败
+        messages = self.session_messages()
+        self.assertEqual(messages[0]["content"], "嗨")
+        self.assertEqual(messages[-1]["status"], "failed")
 
 
 class SkillPrefixRoutingTest(WiringSwapMixin, unittest.TestCase):
@@ -476,11 +547,14 @@ class SkillPrefixRoutingTest(WiringSwapMixin, unittest.TestCase):
             "POST", "/chat/stream", json={"message": "/时间报告 3 天后是几号"}
         ) as resp:
             frames = self._parse_frames(resp)
-        self.assertEqual([f["type"] for f in frames], ["task_started", "final"])
+        self.assertEqual(
+            [f["type"] for f in frames if f.get("type") != "task_meta"],
+            ["task_started", "final"],
+        )
         task, _provider, _model, activated = fake_engine.calls[0]
         self.assertEqual(task, "/时间报告 3 天后是几号")
         self.assertEqual(activated[0].name, "时间报告")
-        self.assertEqual(len(server.conversation), 2)
+        self.assertEqual(len(self.session_messages()), 2)
 
     def test_unknown_prefix_falls_back_to_chat(self):
         server.llm = FakeStreamLLM([TextDelta("你好")])
@@ -501,18 +575,20 @@ class SkillPrefixRoutingTest(WiringSwapMixin, unittest.TestCase):
         self.assertEqual(frames[0]["type"], "delta")
 
 
-class ExportEndpointTest(unittest.TestCase):
+class ExportEndpointTest(SessionStoreMixin, unittest.TestCase):
     def setUp(self):
         self._orig_settings = server.settings
         server.settings = StubSettings()
-        server.conversation.reset()
-        server.conversation.add("user", "问题")
-        server.conversation.add("assistant", "回答")
+        self.setup_session_store()
+        server.session_store.append("default", "user", "问题")
+        server.session_store.append(
+            "default", "assistant", "回答", provider="glm", model="glm-4.6"
+        )
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         server.settings = self._orig_settings
+        self.teardown_session_store()
 
     def test_markdown_export_contains_messages(self):
         resp = self.client.get("/export")
@@ -528,11 +604,17 @@ class ExportEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         payload = resp.json()
         self.assertEqual(payload["default_provider"], "glm")
+        # 每条回答带实际厂商归属（SPEC-0005 Q19：导出不再一律套默认厂商）
         self.assertEqual(
             payload["messages"],
             [
                 {"role": "user", "content": "问题"},
-                {"role": "assistant", "content": "回答"},
+                {
+                    "role": "assistant",
+                    "content": "回答",
+                    "provider": "glm",
+                    "model": "glm-4.6",
+                },
             ],
         )
 
@@ -542,7 +624,7 @@ class ExportEndpointTest(unittest.TestCase):
         self.assertIn("不支持的导出格式", resp.json()["detail"])
 
 
-class ExportTracesTest(unittest.TestCase):
+class ExportTracesTest(SessionStoreMixin, unittest.TestCase):
     """导出「含任务轨迹」显式选项：默认只导主对话不变。"""
 
     def setUp(self):
@@ -551,9 +633,9 @@ class ExportTracesTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         server.settings = StubSettings()
         server.audit_log_dir = Path(self._tmp.name)
-        server.conversation.reset()
-        server.conversation.add("user", "问题")
-        server.conversation.add("assistant", "回答")
+        self.setup_session_store()
+        server.session_store.append("default", "user", "问题")
+        server.session_store.append("default", "assistant", "回答")
         audit = TaskAuditLog("任务X", directory=server.audit_log_dir)
         audit.record(
             TaskStarted(task="任务X", agent_id="main", agent_name="编排器", role="orchestrator")
@@ -572,10 +654,10 @@ class ExportTracesTest(unittest.TestCase):
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         server.settings = self._orig_settings
         server.audit_log_dir = self._orig_audit_dir
         self._tmp.cleanup()
+        self.teardown_session_store()
 
     def test_markdown_export_with_traces_renders_tree(self):
         resp = self.client.get("/export?traces=true")

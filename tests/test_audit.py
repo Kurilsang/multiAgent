@@ -52,8 +52,13 @@ class TaskAuditLogTest(unittest.TestCase):
         self.assertEqual(payload["parent_id"], "main")
 
     def test_read_task_logs_roundtrip(self):
-        TaskAuditLog("任务一", directory=self.dir)
-        audit2 = TaskAuditLog("任务二", directory=self.dir)
+        # 注入不同时间戳：同一秒内的两份日志按 mtime 兜底排序时，Windows 上
+        # mtime_ns 可能完全相同，退化成 uuid 随机序（已记录，待 #58 的任务索引
+        # 提供权威顺序）。这里断言的是「按时间序读回」这一行为本身。
+        TaskAuditLog("任务一", directory=self.dir, now=datetime(2026, 10, 10, 12, 0, 0))
+        audit2 = TaskAuditLog(
+            "任务二", directory=self.dir, now=datetime(2026, 10, 10, 12, 0, 1)
+        )
         audit2.record(TaskStarted(task="任务二"))
         tasks = read_task_logs(self.dir)
         self.assertEqual([t["task"] for t in tasks], ["任务一", "任务二"])

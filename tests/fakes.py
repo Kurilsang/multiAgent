@@ -3,14 +3,51 @@
 主缝隙 = LLM 客户端抽象:引擎与入口层的测试用脚本化 fake,
 不发起真实请求;工具经注册表注册假工具或直接用占位工具集,
 杜绝真实时钟与网络。
+
+另有会话库隔离缝 `SessionStoreMixin`（SPEC-0005）:把服务端会话库
+切到临时目录并在 tearDown 还原，保证测试不往仓库 data/ 写任何东西。
 """
 
 import json
+import tempfile
 from pathlib import Path
 
 from app.llm import ResponseToolCalls, TextDelta, ToolCall
 from app.tools import Tool, ToolRegistry
 from services.catalog.schema import CatalogEntry
+
+
+class SessionStoreMixin:
+    """把服务端会话库切到临时目录（SPEC-0005）。
+
+    会话历史落库后，「清空对话」不再是一个内存调用，而是换一个库；
+    沿用既有磁盘隔离约定（TemporaryDirectory + 全局注入点还原），
+    保证测试不往仓库 data/ 写任何东西。
+    """
+
+    def setup_session_store(self):
+        import app.server as server
+
+        self._session_tmp = tempfile.TemporaryDirectory()
+        self._orig_session_db = server.session_db_path
+        server.reset_session_store(Path(self._session_tmp.name) / "sessions.db")
+        server.get_session_store()
+        return server.session_store
+
+    def teardown_session_store(self):
+        import app.server as server
+
+        server.reset_session_store(self._orig_session_db)
+        self._session_tmp.cleanup()
+
+    def session_messages(self, session_id: str = "default") -> list[dict]:
+        """当前会话历史（替代旧的内存 conversation 断言）。"""
+        import app.server as server
+
+        return server.session_store.messages(session_id)
+
+    def session_contents(self, session_id: str = "default") -> list[str]:
+        return [m["content"] for m in self.session_messages(session_id)]
 
 
 def text_round(text: str) -> list:

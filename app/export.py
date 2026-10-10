@@ -11,7 +11,11 @@ _ROLE_LABELS = {"user": "用户", "assistant": "助手"}
 
 
 def to_markdown(messages: list[dict], *, default_provider: str, now: datetime | None = None) -> str:
-    """把历史消息渲染成带序号与角色标注的 Markdown。"""
+    """把历史消息渲染成带序号与角色标注的 Markdown。
+
+    每条 assistant 消息若带 provider/model（持久化后就有），标注该条的实际
+    归属；没有的（旧记录）才退回 default_provider 说明。
+    """
     timestamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "# multiagent 对话导出",
@@ -25,11 +29,22 @@ def to_markdown(messages: list[dict], *, default_provider: str, now: datetime | 
     ]
     for index, message in enumerate(messages, 1):
         role = _ROLE_LABELS.get(message["role"], message["role"])
-        lines.append(f"## {index}. [{role}]")
+        origin = _origin_label(message)
+        heading = f"## {index}. [{role}]" + (f"（{origin}）" if origin else "")
+        lines.append(heading)
         lines.append("")
         lines.append(message["content"])
         lines.append("")
     return "\n".join(lines)
+
+
+def _origin_label(message: dict) -> str:
+    """该条消息的实际厂商/模型标注（无则空串）。"""
+    provider = message.get("provider") or ""
+    model = message.get("model") or ""
+    if provider and model:
+        return f"{provider} / {model}"
+    return provider or model
 
 
 def to_json(

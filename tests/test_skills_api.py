@@ -8,10 +8,11 @@ from fastapi.testclient import TestClient
 
 import app.server as server
 
+from tests.fakes import SessionStoreMixin
 from tests.test_server_stream import StubSettings
 
 
-class SkillsApiTest(unittest.TestCase):
+class SkillsApiTest(SessionStoreMixin, unittest.TestCase):
     def setUp(self):
         self._orig = (
             server.settings,
@@ -22,7 +23,7 @@ class SkillsApiTest(unittest.TestCase):
             server.mcp_manager,
         )
         server.settings = StubSettings()
-        server.conversation.reset()
+        self.setup_session_store()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         (
@@ -36,7 +37,6 @@ class SkillsApiTest(unittest.TestCase):
         self.client = TestClient(server.app)
 
     def tearDown(self):
-        server.conversation.reset()
         (
             server.settings,
             server.tool_registry,
@@ -46,6 +46,7 @@ class SkillsApiTest(unittest.TestCase):
             server.mcp_manager,
         ) = self._orig
         self._tmp.cleanup()
+        self.teardown_session_store()
 
     def test_list_and_get_skill(self):
         resp = self.client.get("/skills")

@@ -372,6 +372,15 @@ def _cancelled_answer(trace: list[dict], iterations: int) -> str:
     return _progress_summary(trace, iterations) + "\n\n" + note
 
 
+def _cancelled_terminal(trace: list[dict], iterations: int) -> TaskFinished:
+    """被叫停的终态：partial + 已有进展摘要（三处叫停点共用同一形状）。"""
+    return TaskFinished(
+        status="partial",
+        answer=_cancelled_answer(trace, iterations),
+        iterations=iterations,
+    )
+
+
 def _subtask_status_block(outcomes: list[SubtaskOutcome]) -> str:
     """终态聚合的子任务状态清单（附在最终答案尾部）。"""
     lines = ["---", "子任务状态："]
@@ -595,11 +604,7 @@ class AgentEngine:
         while state not in _TERMINALS:
             if state is AgentState.THINKING:
                 if self._cancelled(cancel):
-                    terminal = TaskFinished(
-                        status="partial",
-                        answer=_cancelled_answer(trace, iterations),
-                        iterations=iterations,
-                    )
+                    terminal = _cancelled_terminal(trace, iterations)
                     state = self._goto(state, AgentState.FINISHED)
                     continue
                 iterations += 1
@@ -612,18 +617,33 @@ class AgentEngine:
                         model,
                         self._schemas,
                     )
-                    for event in stream:
-                        if isinstance(event, TextDelta):
-                            thought_parts.append(event.text)
-                            yield self._tag(ThoughtDelta(text=event.text))
-                        elif isinstance(event, ReasoningDelta):
-                            # 思考链只透传展示，不写入轨迹：历史回放只保留正式内容
-                            yield self._tag(ThoughtDelta(text=event.text))
-                        elif isinstance(event, ResponseToolCalls):
-                            calls = list(event.tool_calls)
+                    try:
+                        for event in stream:
+                            # 叫停要在厂商流内即时生效（SPEC-0005 T1）：只在迭代
+                            # 边界轮询的话，卡在一次长调用里时「停止」形同虚设
+                            if self._cancelled(cancel):
+                                break
+                            if isinstance(event, TextDelta):
+                                thought_parts.append(event.text)
+                                yield self._tag(ThoughtDelta(text=event.text))
+                            elif isinstance(event, ReasoningDelta):
+                                # 思考链只透传展示，不写入轨迹：历史回放只保留正式内容
+                                yield self._tag(ThoughtDelta(text=event.text))
+                            elif isinstance(event, ResponseToolCalls):
+                                calls = list(event.tool_calls)
+                    finally:
+                        close = getattr(stream, "close", None)
+                        if close is not None:
+                            close()
                 except LLMError as exc:
                     state = self._goto(state, AgentState.FAILED)
                     terminal = TaskFailed(reason=str(exc), iterations=iterations)
+                    continue
+
+                if self._cancelled(cancel):
+                    # 流内叫停：丢弃本轮半截产出，按 partial 收尾并保留已有进展
+                    state = self._goto(state, AgentState.FINISHED)
+                    terminal = _cancelled_terminal(trace, iterations)
                     continue
 
                 thought = "".join(thought_parts)
@@ -730,11 +750,7 @@ class AgentEngine:
                 state = self._goto(state, AgentState.JUDGING)
             else:  # JUDGING：双层终止的引擎侧谓词，不发起额外模型调用
                 if self._cancelled(cancel):
-                    terminal = TaskFinished(
-                        status="partial",
-                        answer=_cancelled_answer(trace, iterations),
-                        iterations=iterations,
-                    )
+                    terminal = _cancelled_terminal(trace, iterations)
                     state = self._goto(state, AgentState.FINISHED)
                 elif self._is_dead_loop(recent_actions):
                     terminal = TaskFailed(

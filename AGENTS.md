@@ -4,7 +4,7 @@
 
 ## 项目定位
 
-内部网关场景特化的多厂商 LLM 对话服务（DeepSeek / GLM / MiniMax，均走 OpenAI 兼容 API），双入口：终端 CLI + FastAPI WebUI/HTTP API。当前是第六步：多 Agent 协作（已落地，规格 docs/specs/0004；第五步 MCP 市场与 MCP 工具接入、第三、四步技能市场与技能在线目录为其底座）。术语表见 [CONTEXT.md](CONTEXT.md)，设计规格见 [docs/specs/](docs/specs/)。
+内部网关场景特化的多厂商 LLM 对话服务（DeepSeek / GLM / MiniMax，均走 OpenAI 兼容 API），双入口：终端 CLI + FastAPI WebUI/HTTP API。当前是第七步：多会话持久化与断连续流（进行中，规格 docs/specs/0005；第六步多 Agent 协作、第五步 MCP 市场、第三、四步技能市场与技能在线目录均已落地）。术语表见 [CONTEXT.md](CONTEXT.md)，设计规格见 [docs/specs/](docs/specs/)。
 
 ## 怎么跑
 

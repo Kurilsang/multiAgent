@@ -246,7 +246,7 @@ _DOTENV_PATH = PROJECT_ROOT / ".env"
 
 app = FastAPI(
     title="multiagent",
-    description="内部网关场景 Agent —— 第六步多 Agent 协作已落地（编排派发 + 并行子任务 + critic 收尾；前五步三厂商对话、ReAct 循环、技能市场、在线目录、MCP 市场为其底座）",
+    description="内部网关场景 Agent —— 第七步多会话持久化与断连续流进行中（会话落库 + 任务生命周期与 HTTP 连接解耦已落地；前六步三厂商对话、ReAct 循环、技能市场、在线目录、MCP 市场、多 Agent 协作为其底座）",
 )
 
 

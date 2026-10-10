@@ -127,7 +127,7 @@ MCP 生态已有大量现成的工具服务器（GitHub、文件系统、数据�
 - 第二家在线源适配器（Smithery / ClawHub / mcp.so）
 - MCP 协议的 prompts / resources / sampling / elicitation
 - `/` 弹层与 `/技能名` 路由纳入 MCP
-- 多会话持久化（重启清空现状不变，旁存句柄池同样不持久）
+- 多会话持久化（**已于 SPEC-0005 解禁**，见 [0005-session-persistence.md](0005-session-persistence.md)；旁存句柄池仍不持久）
 - stdio 沙箱（不做；风险经确认卡与文档披露）
 - CLI 侧改动（CLI 工具调用随注册表自然生效，无 CLI 专属功能）
 

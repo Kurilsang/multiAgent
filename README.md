@@ -1,6 +1,6 @@
 # multiagent
 
-针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡 + 动态 OAuth 授权流）；第六步多 Agent 协作已落地（编排器派发 + 并行子任务 + critic 收尾 + 轨迹树与审计日志）。
+针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡 + 动态 OAuth 授权流）；第六步多 Agent 协作已落地（编排器派发 + 并行子任务 + critic 收尾 + 轨迹树与审计日志）；第七步多会话持久化与断连续流进行中（会话落库 + 任务生命周期与 HTTP 连接解耦已落地，见 [docs/specs/0005](docs/specs/0005-session-persistence.md)）。
 
 ## 特性
 
@@ -159,19 +159,21 @@ curl http://127.0.0.1:8000/providers
 app/
 ├── config.py        # .env 加载、厂商注册表、目标解析（支持按厂商覆盖 base_url）
 ├── llm.py           # OpenAI SDK 统一封装（流式/非流式、function calling、思考链转写、错误转译）
-├── conversation.py  # 主对话历史管理与截断
+├── conversation.py  # 主对话上下文管理与截断（可由持久化历史重建）
+├── sessions.py      # 会话持久化：data/sessions.db（WAL + 版本化迁移 + 多进程占用检测）
+├── tasks.py         # 任务运行器：后台执行、事件带 seq/ts 进缓冲并广播（断连 = 退订）
 ├── agent.py         # ReAct 状态机引擎：任务循环、双层终止、多 Agent 派发/critic、动态技能清单/预激活
 ├── skills.py        # 技能注册表：SKILL.md 解析/校验/自产、启停状态、安装器（Git/本地）
 ├── mcp.py           # MCP 连接定义模型 + 运行时管理器（client factory 测试缝、stdio/streamable-http 会话）
 ├── mcp_auth.py      # MCP 动态 OAuth 授权（token 文件存储 + 授权码/PKCE 贴码 + 设备码 + 授权状态）
 ├── observation.py   # 观察值视图 + 旁存续读（内存句柄池 LRU、read_tool_result 元工具）
-├── audit.py         # 任务审计日志：logs/tasks/*.jsonl 全事件留痕（含子 agent 轨迹，只可回看）
+├── audit.py         # 任务审计日志：logs/tasks/*.jsonl 全事件留痕（含子 agent 轨迹与会话归属）
 ├── tools.py         # 工具注册表 + 占位工具集 + 技能元工具（use_skill/search_skills/create_skill）
 ├── export.py        # 对话导出格式化（markdown / json 纯函数 + 任务轨迹协作树渲染）
-├── cli.py           # 终端入口（/chat 流式 + /agent 任务 + /export 导出）
-├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/agent/stop、/skills*、/mcp*、/market、/export）
+├── cli.py           # 终端入口（/chat 流式 + /agent 任务 + /export 导出；进程内单会话）
+├── server.py        # HTTP API + WebUI 入口（/chat/stream、/agent/stream、/agent/stop、/sessions*、/skills*、/mcp*、/market、/export）
 └── static/
-    └── index.html   # WebUI（聊天流式 + 任务时间线轨迹树 + 停止按钮 + / 技能弹层 + 统一市场：技能/MCP 双类资产已安装/在线浏览 + 单次确认卡，无框架，单文件）
+    └── index.html   # WebUI（聊天流式 + 会话路由与历史重放 + 任务时间线轨迹树 + 停止按钮 + / 技能弹层 + 统一市场：技能/MCP 双类资产已安装/在线浏览 + 单次确认卡，无框架，单文件）
 services/
 └── catalog/         # 在线目录爬取服务（独立进程，隔离区 = 唯一外网元数据交互点）
     ├── app.py       # /internal/* 窄合同 + /health
@@ -206,6 +208,9 @@ tests/
 ├── test_catalog_store.py   # SQLite 缓存 / 凭证仓 / 刷新器
 ├── test_catalog_pack.py    # 目录包获取（git 坐标 / ZIP + zip-slip 防护）
 ├── test_market_api.py      # 主服务 /market/* 代理与目录包安装
+├── test_sessions.py        # 会话库（落库/迁移/多进程检测/命名）
+├── test_sessions_api.py    # 会话 HTTP 面（落库时机/恢复/CRUD/归属）
+├── test_tasks.py           # 任务生命周期解耦（真实 uvicorn：断连不取消/重连/并发拒绝）
 ├── test_export.py
 └── test_server_stream.py
 ```

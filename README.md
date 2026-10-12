@@ -1,6 +1,6 @@
 # multiagent
 
-针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡 + 动态 OAuth 授权流）；第六步多 Agent 协作已落地（编排器派发 + 并行子任务 + critic 收尾 + 轨迹树与审计日志）；第七步多会话持久化与断连续流进行中（会话落库 + 任务生命周期与 HTTP 连接解耦已落地，见 [docs/specs/0005](docs/specs/0005-session-persistence.md)）。
+针对内部网关场景特化的 Agent 项目。在多厂商大模型对话（DeepSeek / GLM / MiniMax）之上，引入 ReAct 式 Agent 自主执行循环：思考→行动→观察→判断，双入口全链路流式；第三步落地技能市场：SKILL.md 文件化技能包、动态清单与双通道技能调用；第四步接入技能在线目录：独立爬取服务抓目录，浏览点装一键完成；第五步 MCP 市场与 MCP 工具接入已落地（连接定义 + 启动装配 + 观察值续读 + 管理面 + 官方 MCP Registry 目录 + WebUI 统一市场与 MCP 单次确认卡 + 动态 OAuth 授权流）；第六步多 Agent 协作已落地（编排器派发 + 并行子任务 + critic 收尾 + 轨迹树与审计日志）；第七步多会话持久化与断连续流已落地（会话落库 + 任务生命周期解耦 + 断连续流，见 [docs/specs/0005](docs/specs/0005-session-persistence.md)）；第八步会话内记忆与上下文预算已落地（预算分层装配 + 滚动摘要 + 观察值降级，见 [docs/specs/0006](docs/specs/0006-context-memory.md)）。
 
 ## 特性
 

@@ -35,6 +35,12 @@ results.push([
   formatContextBadge({{ estimated_tokens: 900, budget_tokens: 900, degraded: true }}).includes('已降级'),
 ]);
 
+// 压缩线标注
+results.push([
+  '压缩线标注',
+  formatContextBadge({{ estimated_tokens: 900, budget_tokens: 900, compressed_upto: 12 }}).includes('已压缩至 #12'),
+]);
+
 let bad = 0;
 for (const [name, pass] of results) {{
   console.log((pass ? 'PASS ' : 'FAIL ') + name);

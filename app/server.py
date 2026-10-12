@@ -65,7 +65,7 @@ from .agent import (
 )
 from .audit import TaskAuditLog, has_terminal, read_task_log, read_task_logs
 from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
-from .context_budget import assemble_messages, context_budget_from_settings
+from .context_budget import assemble_messages, assemble_with_summary, context_budget_from_settings
 from .context_budget import context_meta as build_context_meta
 from .context_budget import estimate_messages, MESSAGE_OVERHEAD_TOKENS
 from .conversation import Conversation
@@ -356,6 +356,52 @@ def _conversation_for(session_id: str) -> Conversation:
     )
 
 
+def _summarize_turn(old_summary, absorbed, provider=None, model=None):
+    """把被吸收的对话段与旧摘要合并成滚动摘要（走现有对话通道）。"""
+    transcript = "\n".join(f"{m['role']}: {m['content']}" for m in absorbed)
+    prompt = (
+        "已有摘要：\n"
+        + (old_summary or "（无）")
+        + "\n\n新增对话段（合并进摘要，保留约束/结论/待办/关键事实，简洁、不虚构）：\n"
+        + transcript
+    )
+    result = llm.chat(
+        [
+            {"role": "system", "content": "你是对话记忆压缩器，输出要点摘要。"},
+            {"role": "user", "content": prompt},
+        ],
+        provider,
+        model,
+    )
+    return result.content
+
+
+def _build_chat_context(session_id, system_text, provider=None, model=None):
+    """滚动摘要 + 记忆块装配（SPEC-0006 T3）：会话通道唯一入模实现点。"""
+    history = [
+        {"seq": m["seq"], "role": m["role"], "content": m["content"]}
+        for m in session_store.messages(session_id)
+    ]
+    existing = session_store.get_summary(session_id) or {
+        "covered_seq": 0,
+        "content": None,
+    }
+
+    def on_summary(seq, content):
+        session_store.save_summary(session_id, covered_seq=seq, content=content)
+
+    return assemble_with_summary(
+        system_text,
+        history,
+        budget_tokens=context_budget_from_settings(settings),
+        recent_floor=settings.max_context_messages,
+        covered_seq=existing["covered_seq"],
+        summary_text=existing["content"],
+        summarize=lambda old, absorbed: _summarize_turn(old, absorbed, provider, model),
+        on_summary=on_summary,
+    )
+
+
 class SessionNameRequest(BaseModel):
     name: str = Field(min_length=1)
 
@@ -551,8 +597,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         session_store.append(sid, "user", req.message)
         _name_session_from_first_message(sid, req.message)
         try:
-            messages_for_model, assembled_meta = _conversation_for(sid).assemble(
-                context_budget_from_settings(settings)
+            messages_for_model, assembled_meta = _build_chat_context(
+                sid, None, req.provider, req.model
             )
             result = llm.chat(messages_for_model, req.provider, req.model)
         except ConfigError as exc:
@@ -671,11 +717,8 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
                 "未列入清单的技能可用 search_skills 检索。\n\n" + system
             )
         budget_tokens = context_budget_from_settings(settings)
-        messages, assembled_meta = assemble_messages(
-            system_text,
-            conversation.history(),
-            budget_tokens=budget_tokens,
-            recent_floor=settings.max_context_messages,
+        messages, assembled_meta = _build_chat_context(
+            session_id, system_text, req.provider, req.model
         )
         mcp_names = [name for name in tool_registry.names() if name.startswith("mcp__")]
         base_names = [*SKILL_TOOL_NAMES, READ_TOOL_NAME, *mcp_names]

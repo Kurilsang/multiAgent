@@ -690,11 +690,12 @@ function addMeta(wrap, text) {
   wrap.appendChild(m);
 }
 
-// 上下文账目角标（SPEC-0006）：估算占用 / 预算，降级时标注
+// 上下文账目角标（SPEC-0006）：估算占用 / 预算，压缩与降级标注
 function formatContextBadge(meta) {
   if (!meta || !meta.budget_tokens) return '';
   const fmt = (n) => n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
   let text = '≈' + fmt(meta.estimated_tokens) + ' / ' + fmt(meta.budget_tokens) + ' token';
+  if (meta.compressed_upto) text += ' · 已压缩至 #' + meta.compressed_upto;
   if (meta.degraded) text += '（已降级）';
   return text;
 }

@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 # 会话库 schema 版本：新增迁移时 +1 并在 _MIGRATIONS 登记
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # 默认会话标识：不带 session_id 的请求落到这里（既有调用方式不破）
 DEFAULT_SESSION_ID = "default"
 # 会话名缺省取首条用户消息的前若干字符
@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id, started_at);
 """
 
+# v3：滚动摘要（SPEC-0006 T3，每会话一条，覆盖水位单调推进）
+_SUMMARY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_summaries (
+    session_id TEXT PRIMARY KEY,
+    covered_seq INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 
 class SessionStoreError(Exception):
     """会话库不可用（版本不匹配、被其他进程占用等），信息面向用户。"""
@@ -84,8 +94,13 @@ def _migrate_to_2(conn) -> None:
     conn.executescript(_TASKS_SCHEMA)
 
 
+def _migrate_to_3(conn) -> None:
+    """v3：滚动摘要表（会话内记忆，SPEC-0006）。"""
+    conn.executescript(_SUMMARY_SCHEMA)
+
+
 # 版本 → 迁移函数（模块级：存进字典后不会被绑定成方法）
-_MIGRATIONS = {1: _migrate_to_1, 2: _migrate_to_2}
+_MIGRATIONS = {1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3}
 
 
 def session_name_from(text: str) -> str:
@@ -394,6 +409,34 @@ class SessionStore:
                 item["steps"] = []
             out.append(item)
         return out
+
+    # ---- 滚动摘要（SPEC-0006 T3）：每会话一条，覆盖水位单调推进 ----
+
+    def get_summary(self, session_id: str) -> dict | None:
+        """读回会话的滚动摘要；无摘要返回 None。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT covered_seq, content FROM session_summaries WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"covered_seq": row["covered_seq"], "content": row["content"]}
+
+    def save_summary(self, session_id: str, *, covered_seq: int, content: str) -> None:
+        """写入/覆盖会话滚动摘要（单行 upsert）。"""
+        stamp = self._stamp()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO session_summaries (session_id, covered_seq, content, updated_at)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET"
+                " covered_seq = excluded.covered_seq,"
+                " content = excluded.content,"
+                " updated_at = excluded.updated_at",
+                (session_id, covered_seq, content, stamp),
+            )
+            self._conn.commit()
 
     # ---- 任务索引（事件仍以审计 JSONL 为唯一权威副本） ----
 

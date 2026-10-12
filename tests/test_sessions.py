@@ -324,6 +324,86 @@ class SessionStoreTest(unittest.TestCase):
             migrated.close()
 
 
+class SessionSummaryTest(unittest.TestCase):
+    """滚动摘要存储（SPEC-0006 T3）：每会话一条，覆盖水位单调。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "sessions.db"
+        self.store = SessionStore(self.path)
+
+    def tearDown(self):
+        self.store.close()
+        self._tmp.cleanup()
+
+    def test_no_summary_initially(self):
+        self.assertIsNone(self.store.get_summary("default"))
+
+    def test_save_and_get_summary_roundtrip(self):
+        self.store.save_summary("default", covered_seq=5, content="摘要内容")
+        summary = self.store.get_summary("default")
+        self.assertEqual(summary["covered_seq"], 5)
+        self.assertEqual(summary["content"], "摘要内容")
+
+    def test_summary_upserts_single_row(self):
+        self.store.save_summary("default", covered_seq=5, content="旧")
+        self.store.save_summary("default", covered_seq=12, content="新")
+        summary = self.store.get_summary("default")
+        self.assertEqual(summary["covered_seq"], 12)
+        self.assertEqual(summary["content"], "新")
+
+    def test_summary_persists_across_reopen(self):
+        self.store.save_summary("default", covered_seq=7, content="持久化摘要")
+        self.store.close()
+        reopened = SessionStore(self.path)
+        try:
+            self.assertEqual(reopened.get_summary("default")["content"], "持久化摘要")
+        finally:
+            reopened.close()
+
+    def test_v2_database_migrates_to_v3_gaining_summary_table(self):
+        """既有 v2 库能被迁移，数据不丢、新表可用。"""
+        self.store.close()
+        legacy = Path(self._tmp.name) / "legacy.db"
+        conn = sqlite3.connect(str(legacy))
+        conn.executescript(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',"
+            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " session_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL,"
+            " content TEXT NOT NULL, provider TEXT, model TEXT,"
+            " status TEXT NOT NULL DEFAULT 'ok', reasoning TEXT, steps TEXT,"
+            " created_at TEXT NOT NULL);"
+            "CREATE TABLE runtime (id INTEGER PRIMARY KEY CHECK (id = 1),"
+            " pid INTEGER NOT NULL, heartbeat_at TEXT NOT NULL);"
+            "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,"
+            " task TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,"
+            " finished_at TEXT, log_path TEXT NOT NULL DEFAULT '');"
+            "PRAGMA user_version = 2;"
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, name, created_at, updated_at) VALUES"
+            " ('default', '旧会话', '2026-10-10T10:00:00', '2026-10-10T10:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, seq, role, content, created_at)"
+            " VALUES ('default', 1, 'user', '旧消息', '2026-10-10T10:00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = SessionStore(legacy)
+        try:
+            self.assertEqual(migrated.schema_version, SCHEMA_VERSION)
+            self.assertEqual(
+                [m["content"] for m in migrated.messages("default")], ["旧消息"]
+            )
+            migrated.save_summary("default", covered_seq=3, content="迁移后摘要")
+            self.assertEqual(migrated.get_summary("default")["content"], "迁移后摘要")
+        finally:
+            migrated.close()
+
+
 class SessionStorageConventionTest(unittest.TestCase):
     """会话库的落盘约定：数据目录不入库、默认路径指向 data/。"""
 

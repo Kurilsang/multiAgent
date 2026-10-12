@@ -139,3 +139,89 @@ def assemble_messages(
         "degraded": degraded,
     }
     return messages, meta
+
+
+def _fill_budget(
+    head: list[dict], fresh: list[dict], budget_tokens: int, recent_floor: int
+) -> tuple[list[dict], list[dict], bool]:
+    """预算内装填 fresh：返回 (逐字入模, 被舍弃的最旧段, 是否硬截断保底)。"""
+    if recent_floor < 1:
+        recent_floor = 1
+    tail = list(fresh[-recent_floor:]) if fresh else []
+    older = list(fresh[: len(fresh) - len(tail)])
+    floor_truncated = False
+    while len(tail) > 1 and estimate_messages(head + tail) > budget_tokens:
+        tail.pop(0)
+        floor_truncated = True
+    while older:
+        candidate = [dict(older[-1])] + tail
+        if estimate_messages(head + candidate) > budget_tokens:
+            break
+        tail = candidate
+        older.pop()
+    return tail, older, floor_truncated
+
+
+def assemble_with_summary(
+    system: str | None,
+    history: list[dict],
+    *,
+    budget_tokens: int,
+    recent_floor: int,
+    covered_seq: int = 0,
+    summary_text: str | None = None,
+    summarize=None,
+    on_summary=None,
+    memory_blocks: list[str] | None = None,
+) -> tuple[list[dict], dict]:
+    """滚动摘要 + 记忆块装配（SPEC-0006 T3）。
+
+    history 条目须带 ``seq``（会话库消息序号）。装不下的**最旧连续段**不是
+    丢弃，而是吸收进滚动摘要（记忆块注入 system 之后）；摘要合并旧摘要、
+    覆盖水位单调推进。summarize(old_summary, absorbed) -> str 为注入的摘要
+    生成（现有对话通道）；on_summary(covered_seq, content) 为落库回调。
+    无 summarize 或仍装不下则降级硬截断（degraded），对话不阻塞。
+    """
+    extra_blocks = list(memory_blocks or [])
+    summary_generated = False
+    floor_truncated = False
+    kept: list[dict] = []
+    dropped: list[dict] = list(history)
+
+    for _ in range(len(history) + 2):  # 有界：每轮 covered_seq 必然推进
+        blocks = ([summary_text] if summary_text else []) + extra_blocks
+        head = (
+            [{"role": "system", "content": system}] if system else []
+        ) + [{"role": "system", "content": b} for b in blocks]
+        fresh = [m for m in history if m["seq"] > covered_seq]
+        kept, dropped, truncated = _fill_budget(
+            head, fresh, budget_tokens, recent_floor
+        )
+        floor_truncated = floor_truncated or truncated
+        if not dropped or summarize is None:
+            break
+        new_covered = dropped[-1]["seq"]
+        try:
+            new_summary = summarize(summary_text, dropped)
+        except Exception:  # 摘要失败 → 降级硬截断，对话不阻塞
+            break
+        summary_text = new_summary
+        covered_seq = new_covered
+        summary_generated = True
+        if on_summary is not None:
+            on_summary(covered_seq, summary_text)
+
+    blocks = ([summary_text] if summary_text else []) + extra_blocks
+    head = (
+        [{"role": "system", "content": system}] if system else []
+    ) + [{"role": "system", "content": b} for b in blocks]
+    messages = head + [dict(m) for m in kept]
+    degraded = bool(dropped) or floor_truncated
+    meta = {
+        "estimated_tokens": estimate_messages(messages),
+        "budget_tokens": budget_tokens,
+        "compressed_upto": covered_seq if summary_text else None,
+        "summary_generated": summary_generated,
+        "degraded": degraded,
+    }
+    return messages, meta

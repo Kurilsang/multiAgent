@@ -102,24 +102,19 @@ class ContextMetaApiTest(SessionStoreMixin, unittest.TestCase):
         self.assertEqual(sent[0]["content"], "q0")
         self.assertEqual(sent[-1]["content"], "q9")
 
-    def test_small_budget_keeps_floor_and_marks_degraded(self):
-        """预算只装得下保底附近：旧对话被舍弃并标 degraded。"""
+    def test_small_budget_summarizes_older_turns(self):
+        """预算紧张时旧对话吸收进滚动摘要（记忆块）而非丢弃（SPEC-0006 T3）。"""
         server.settings.max_context_messages = 4
         for i in range(10):
             self.client.post("/chat", json={"message": f"q{i}"})
-        # q_final 落库后历史 21 条（20 + q_final）；预算 56：
-        # 保底 4（ok,q9,ok,q_final = 38）+ 更早 2（q8,ok = 18）
         server.settings.context_window_tokens = 76
         server.settings.context_output_reserve_tokens = 20
         resp = self.client.post("/chat", json={"message": "q_final"})
-        sent = self.recording.calls[-1]
         meta = resp.json()["context_meta"]
-        self.assertEqual(len(sent), 6)
-        self.assertEqual(
-            [m["content"] for m in sent],
-            ["ok", "q8", "ok", "q9", "ok", "q_final"],
-        )
-        self.assertTrue(meta["degraded"])
+        sent = self.recording.calls[-1]
+        self.assertTrue(meta["summary_generated"])
+        self.assertGreater(meta["compressed_upto"], 0)
+        self.assertEqual(sent[-1]["content"], "q_final")  # 最新逐字在场
 
 
 if __name__ == "__main__":

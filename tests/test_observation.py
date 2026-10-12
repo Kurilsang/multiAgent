@@ -237,6 +237,34 @@ class ChatReadMoreTest(SessionStoreMixin, unittest.TestCase):
         self.assertFalse(observations[2]["is_error"])  # 闸门放行 read_tool_result
         self.assertEqual(len(fake.calls), 4)  # 续读占一轮聊天预算
 
+    def test_big_observations_compressed_under_budget(self):
+        """预算驱动降级：连续大观察值收缩视图，入模估算不超预算（SPEC-0006 T4）。"""
+        from app.context_budget import estimate_messages
+
+        budget = 1200
+        self.server.settings.context_window_tokens = budget
+        self.server.settings.context_output_reserve_tokens = 0
+        fake = FakeLLMClient(
+            [
+                tool_round("use_skill", {"name": "大结果"}),
+                tool_round("big_tool", {}),
+                tool_round("big_tool", {}),
+                text_round("完成"),
+            ]
+        )
+        self.server.llm = fake
+        resp = self.client.post("/chat/stream", json={"message": "取一下"})
+        frames = self.frames(resp)
+        big = [f for f in frames if f.get("type") == "observation" and f["tool"] == "big_tool"]
+        self.assertEqual(len(big), 2)
+        for f in big:
+            view = f["text"].splitlines()[0]
+            self.assertLess(len(view), 4000)  # 被预算压到默认视图之下
+            self.assertGreaterEqual(len(view), 500)  # 但不低于保底
+        # 主缝断言：每次入模的估算占用不超预算
+        for sent, _tools in fake.calls:
+            self.assertLessEqual(estimate_messages(sent), budget)
+
 
 if __name__ == "__main__":
     unittest.main()

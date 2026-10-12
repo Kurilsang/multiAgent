@@ -65,6 +65,7 @@ class StubSettings:
     catalog_base_url = "http://catalog.test"
     mcp_max_tools = 64
     observation_max_chars = 4000
+    observation_min_chars = 500
     max_context_messages = 20
     context_window_tokens = 32000
     context_output_reserve_tokens = 4096

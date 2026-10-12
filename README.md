@@ -226,7 +226,7 @@ tests/
 
 技能相关：`SKILLS_DIR` 指定技能包目录（默认 `skills/`，相对项目根）；`SKILLS_CATALOG_MAX` 控制技能清单注入 system prompt 的条数上限（默认 30，超出部分模型可用 `search_skills` 检索）；`CHAT_MAX_TOOL_TURNS` 控制聊天通道迷你工具循环的轮数上限（默认 4）；`CATALOG_BASE_URL` 指向技能在线目录爬取服务（默认 `http://127.0.0.1:8100`，留空则关闭在线目录并隐藏入口）；`CATALOG_AUTOSTART` 控制主服务是否自动托管本机爬取服务（默认开，外部部署/自行管理时置 0）。爬取服务自身配置（`CATALOG_HOST` / `CATALOG_PORT` / `CATALOG_DB` / `CATALOG_REFRESH_HOURS` / `CATALOG_SOURCES`）见 [services/catalog/README.md](services/catalog/README.md)。
 
-MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`MCP_TOKEN_FILE` 为 OAuth token 文件（默认 `mcp/tokens.json`，`auth: oauth` 服务的授权产物：权限收紧、不入库、不进 `.env` 明文）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）。
+MCP 与观察值：`MCP_CONFIG` 指定 MCP 连接定义文件（默认 `mcp/servers.json`，相对项目根，条目形态见 [docs/specs/0003-mcp-market.md](docs/specs/0003-mcp-market.md)）；`MCP_MAX_TOOLS` 为 MCP 工具总数上限（默认 64，超限在装配期报错提示禁用部分服务，0 = 不限）；`MCP_TOKEN_FILE` 为 OAuth token 文件（默认 `mcp/tokens.json`，`auth: oauth` 服务的授权产物：权限收紧、不入库、不进 `.env` 明文）；`OBSERVATION_MAX_CHARS` 为工具观察值视图大小（默认 4000；截断时全文旁存句柄池、模型经 `read_tool_result` 续读，0 = 全量直灌）；`OBSERVATION_MIN_CHARS` 为预算降级保底（默认 500：预算再紧，观察值视图也不低于此字符数）。
 
 会话持久化：`SESSION_DB` 指定会话库路径（默认 `data/sessions.db`，相对项目根，见 [docs/specs/0005-session-persistence.md](docs/specs/0005-session-persistence.md)）。主对话历史与会话元数据落在这里，服务重启后仍在；与审计日志分开存放（会话是一等状态，`logs/` 是可丢弃留痕）。`data/` 已被 `.gitignore` 忽略。库版本高于代码版本、或被另一活进程占用时，启动会打印中文原因并退出。
 

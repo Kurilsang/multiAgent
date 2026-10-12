@@ -67,6 +67,7 @@ from .audit import TaskAuditLog, has_terminal, read_task_log, read_task_logs
 from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
 from .context_budget import assemble_messages, context_budget_from_settings
 from .context_budget import context_meta as build_context_meta
+from .context_budget import estimate_messages, MESSAGE_OVERHEAD_TOKENS
 from .conversation import Conversation
 from .export import to_json, to_markdown, traces_to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
@@ -84,6 +85,7 @@ from .observation import (
     READ_TOOL_NAME,
     ResultPool,
     format_observation,
+    observation_budget_chars,
     read_tool_result_tool,
 )
 from .sessions import (
@@ -583,7 +585,7 @@ def _sse(data: dict) -> str:
 
 
 def _chat_tool_call(
-    call, offered: set[str]
+    call, offered: set[str], budget_limit: int | None = None
 ) -> tuple[dict, dict, tuple[str, ...]]:
     """执行一次聊天工具调用，返回 (观察帧, tool 消息, 本次激活的依赖工具)。
 
@@ -623,6 +625,8 @@ def _chat_tool_call(
                 limit=tool.max_observation_chars,
                 pool=agent_engine.observation_pool,
                 default_limit=settings.observation_max_chars,
+                budget_limit=budget_limit,
+                min_floor=settings.observation_min_chars,
             ),
             True,
         )
@@ -637,6 +641,8 @@ def _chat_tool_call(
             limit=tool.max_observation_chars,
             pool=agent_engine.observation_pool,
             default_limit=settings.observation_max_chars,
+            budget_limit=budget_limit,
+            min_floor=settings.observation_min_chars,
         )
     frame, message, _ = observed(result, False)
     return frame, message, activated
@@ -661,10 +667,11 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
                 "先调用 use_skill(名称) 激活并按指引执行；"
                 "未列入清单的技能可用 search_skills 检索。\n\n" + system
             )
+        budget_tokens = context_budget_from_settings(settings)
         messages, assembled_meta = assemble_messages(
             system_text,
             conversation.history(),
-            budget_tokens=context_budget_from_settings(settings),
+            budget_tokens=budget_tokens,
             recent_floor=settings.max_context_messages,
         )
         mcp_names = [name for name in tool_registry.names() if name.startswith("mcp__")]
@@ -725,6 +732,14 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
                     ],
                 }
                 messages.append(assistant)
+                # 预算驱动的观察值额度：剩余预算按「本轮最多观察值条数」均分
+                # （给后续轮次的观察值留位），每条多留 1 token 吸收 ceil 取整，
+                # 保证入模估算不超预算（floor 仅在极端小预算下兜底）
+                remaining_tokens = budget_tokens - estimate_messages(messages)
+                obs_limit = observation_budget_chars(
+                    remaining_tokens - len(calls) * (MESSAGE_OVERHEAD_TOKENS + 1),
+                    count=settings.chat_max_tool_turns,
+                )
                 for call in calls:
                     step = {
                         "type": "action",
@@ -733,7 +748,9 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
                     }
                     steps.append(step)
                     yield _sse(step)
-                    frame, message, activated = _chat_tool_call(call, offered)
+                    frame, message, activated = _chat_tool_call(
+                        call, offered, budget_limit=obs_limit
+                    )
                     steps.append(frame)
                     yield _sse(frame)
                     messages.append(message)

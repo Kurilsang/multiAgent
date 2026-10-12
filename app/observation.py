@@ -14,6 +14,16 @@ from collections import OrderedDict
 DEFAULT_VIEW_CHARS = 4000
 DEFAULT_POOL_MAX_BYTES = 4 * 1024 * 1024
 READ_TOOL_NAME = "read_tool_result"
+# 预算降级保底（SPEC-0006）：预算再紧，观察值视图也不低于此字符数
+OBSERVATION_MIN_CHARS = 500
+# 保守折算：观察值多为代码/ASCII，3 字符 ≈ 1 token
+CHARS_PER_TOKEN = 3
+
+
+def observation_budget_chars(remaining_tokens: int, count: int = 1) -> int:
+    """把剩余 token 预算折算成观察值视图的字符额度（多条均分，不为负）。"""
+    per = max(int(remaining_tokens), 0) * CHARS_PER_TOKEN
+    return per // max(int(count), 1)
 
 
 class ResultPool:
@@ -51,11 +61,25 @@ class ResultPool:
 
 
 def format_observation(
-    text: str, *, limit: int | None, pool: ResultPool, default_limit: int
+    text: str,
+    *,
+    limit: int | None,
+    pool: ResultPool,
+    default_limit: int,
+    budget_limit: int | None = None,
+    min_floor: int = OBSERVATION_MIN_CHARS,
 ) -> str:
-    """观察值 → 视图（+ 旁存续读指引）；limit=0 或不超限则原样直灌。"""
+    """观察值 → 视图（+ 旁存续读指引）；limit=0 或不超限则原样直灌。
+
+    预算降级（SPEC-0006）：给出 budget_limit 时，视图在配置上限内进一步
+    收缩到预算额度，但不低于 min_floor（功能优先于预算）；全文仍旁存可续读。
+    """
     view_limit = default_limit if limit is None else limit
-    if view_limit <= 0 or len(text) <= view_limit:
+    if view_limit <= 0:
+        return text
+    if budget_limit is not None:
+        view_limit = max(min_floor, min(view_limit, budget_limit))
+    if len(text) <= view_limit:
         return text
     handle = pool.put(text)
     return (

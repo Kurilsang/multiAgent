@@ -88,6 +88,8 @@ class Settings(BaseSettings):
 
     # 工具观察值视图大小：截断时全文旁存、read_tool_result 续读（0 = 全量直灌）
     observation_max_chars: int = Field(default=4000, ge=0)
+    # 预算降级保底：预算再紧，观察值视图也不低于此字符数（SPEC-0006）
+    observation_min_chars: int = Field(default=500, ge=1)
 
     # MCP 连接定义文件（相对项目根）；MCP 工具总数上限（超限装配期 fail loud，0 = 不限）
     mcp_config: str = "mcp/servers.json"

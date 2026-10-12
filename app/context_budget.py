@@ -82,3 +82,60 @@ def context_meta(
         "summary_generated": summary_generated,
         "degraded": degraded,
     }
+
+
+def assemble_messages(
+    system: str | None,
+    history: list[dict],
+    *,
+    budget_tokens: int,
+    recent_floor: int,
+    memory_blocks: list[str] | None = None,
+) -> tuple[list[dict], dict]:
+    """预算分层装配（SPEC-0006 T2）：唯一入模实现点。
+
+    装填顺序（占预算顺序）：system → 记忆块 → 最近 recent_floor 条保底
+    → 更早对话（预算有剩余才逐字入模，与保底连续取最靠近的）。
+    降级阶梯：更早对话装不下即舍弃（degraded，T3 起由滚动摘要兜底）；
+    连保底都装不下时硬截断到 system + 最新一条（degraded）；
+    预算低于单条消息也仍保 system + 最新一条（功能优先于预算）。
+    """
+    head: list[dict] = []
+    if system:
+        head.append({"role": "system", "content": system})
+    for block in memory_blocks or []:
+        head.append({"role": "system", "content": block})
+
+    if recent_floor < 1:
+        recent_floor = 1
+    tail: list[dict] = list(history[-recent_floor:]) if history else []
+    older = list(history[: len(history) - len(tail)])
+
+    # 保底装不下：从最旧开始逐条舍弃，最终保 system + 最新一条
+    while len(tail) > 1 and estimate_messages(head + tail) > budget_tokens:
+        tail.pop(0)
+    if not tail and history:
+        tail = [dict(history[-1])]
+
+    # 更早对话：预算有剩余才进，与保底连续（从最靠近保底的开始）
+    while older:
+        candidate = [dict(older[-1])] + tail
+        if estimate_messages(head + candidate) > budget_tokens:
+            break
+        tail = candidate
+        older.pop()
+
+    # degraded = 有历史没逐字入模（T3 前无摘要兜底）或预算被击穿
+    degraded = len(tail) < len(history) or bool(
+        history and estimate_messages(head + tail) > budget_tokens
+    )
+
+    messages = head + [dict(m) for m in tail]
+    meta = {
+        "estimated_tokens": estimate_messages(messages),
+        "budget_tokens": budget_tokens,
+        "compressed_upto": None,
+        "summary_generated": False,
+        "degraded": degraded,
+    }
+    return messages, meta

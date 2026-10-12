@@ -188,7 +188,7 @@ class SessionApiTest(SessionStoreMixin, unittest.TestCase):
         )
 
     def test_context_sent_to_model_is_truncated_but_history_is_full(self):
-        """展示全量、入模截断（SPEC-0005 Q8）。"""
+        """展示全量、入模受预算约束（SPEC-0005 Q8 / SPEC-0006 语义）。"""
         server.settings.max_context_messages = 4
         seen: list[list[dict]] = []
 
@@ -202,13 +202,12 @@ class SessionApiTest(SessionStoreMixin, unittest.TestCase):
             self.client.post("/chat/stream", json={"message": f"q{index}"})
         # 库里是全量（12 条：6 问 6 答）
         self.assertEqual(len(self.session_messages()), 12)
-        # 入模 = 技能 system 提示 + 最近 4 条历史（本轮提问已先落库）
+        # 预算充足（默认 32000）→ 入模不再硬切到最近 4 条，而是装下全部历史
         sent = seen[-1]
         self.assertEqual(sent[0]["role"], "system")
-        self.assertEqual(len(sent), 5)
-        self.assertEqual(
-            [m["content"] for m in sent[1:]], ["ok", "q4", "ok", "q5"]
-        )
+        self.assertEqual(len(sent), 12)  # system + 11 条历史（本轮 q5 已落库）
+        self.assertEqual(sent[1]["content"], "q0")
+        self.assertEqual(sent[-1]["content"], "q5")
 
     # ---- 会话 CRUD ----
 

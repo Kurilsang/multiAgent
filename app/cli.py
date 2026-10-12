@@ -50,6 +50,7 @@ from .config import (
     resolve_target,
 )
 from .conversation import Conversation
+from .context_budget import context_budget_from_settings
 from .context_budget import context_meta as build_context_meta
 from .export import to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta
@@ -92,7 +93,8 @@ def chat_once(
     console.print("[bold magenta]assistant[/bold magenta] > ", end="")
     collected: list[str] = []
     in_thought = False
-    messages_for_model = conversation.messages_for_api()
+    budget = context_budget_from_settings(settings) if settings else 10**9
+    messages_for_model, _ = conversation.assemble(budget)
     try:
         for event in llm.chat_events(messages_for_model, provider, model):
             if isinstance(event, ReasoningDelta):

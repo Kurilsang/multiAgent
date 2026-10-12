@@ -1,11 +1,14 @@
-"""对话上下文管理：维护单会话消息历史并按上限截断。"""
+"""对话上下文管理：维护单会话消息历史，入模走预算分层装配（SPEC-0006）。"""
+
+from .context_budget import assemble_messages
 
 
 class Conversation:
     """单会话内存上下文。
 
-    消息截断策略：system 提示词始终保留，历史消息只保留最近
-    max_messages 条，防止超出模型上下文窗口。
+    入模策略（SPEC-0006）：按预算分层装配——system → 记忆块 →
+    最近 max_messages 条保底 → 更早对话（预算有剩余才逐字入模）。
+    max_messages 是**保底下限**而非截断上限。
     """
 
     def __init__(self, system_prompt: str | None = None, max_messages: int = 20):
@@ -25,7 +28,7 @@ class Conversation:
         """由持久化历史重建上下文（docs/specs/0005）。
 
         只取 role/content：provider/model/思考链/工具步骤是展示面信息，
-        不进模型上下文。截断策略与内存态完全一致（读时截断）。
+        不进模型上下文。入模装配与内存态完全一致（走 assemble）。
         """
         conversation = cls(system_prompt=system_prompt, max_messages=max_messages)
         for message in history:
@@ -41,16 +44,21 @@ class Conversation:
         """回滚最近一条消息（如请求失败时撤回未得到回复的 user 消息）。"""
         return self._history.pop() if self._history else None
 
-    def messages_for_api(self) -> list[dict]:
-        """组装实际发给模型的消息列表：system + 截断后的历史。
+    def assemble(
+        self, budget_tokens: int, memory_blocks: list[str] | None = None
+    ) -> tuple[list[dict], dict]:
+        """按预算装配入模消息（唯一入模实现点）。
 
-        返回消息的浅拷贝，避免调用方修改污染内部状态。
+        返回 (消息数组, 装配元数据)。返回消息为拷贝，
+        避免调用方修改污染内部状态。
         """
-        messages = []
-        if self._system:
-            messages.append({"role": "system", "content": self._system})
-        messages.extend(dict(m) for m in self._history[-self._max_messages :])
-        return messages
+        return assemble_messages(
+            self._system,
+            self._history,
+            budget_tokens=budget_tokens,
+            recent_floor=self._max_messages,
+            memory_blocks=memory_blocks,
+        )
 
     def history(self) -> list[dict]:
         """完整历史快照（消息为拷贝），供导出等只读用途；不受截断影响。"""

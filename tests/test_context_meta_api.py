@@ -91,6 +91,36 @@ class ContextMetaApiTest(SessionStoreMixin, unittest.TestCase):
         self.assertEqual(done["context_meta"]["budget_tokens"], 900)
         self.assertFalse(done["context_meta"]["degraded"])
 
+    def test_history_fills_budget_before_dropping_anything(self):
+        """预算足够时旧对话全部入模——MAX_CONTEXT_MESSAGES 是保底而非上限。"""
+        server.settings.max_context_messages = 2
+        for i in range(10):
+            self.client.post("/chat", json={"message": f"q{i}"})
+        sent = self.recording.calls[-1]
+        # 最后一问入模时：前 9 轮完整（18 条）+ 本轮提问 = 19 条全在预算内
+        self.assertEqual(len(sent), 19)
+        self.assertEqual(sent[0]["content"], "q0")
+        self.assertEqual(sent[-1]["content"], "q9")
+
+    def test_small_budget_keeps_floor_and_marks_degraded(self):
+        """预算只装得下保底附近：旧对话被舍弃并标 degraded。"""
+        server.settings.max_context_messages = 4
+        for i in range(10):
+            self.client.post("/chat", json={"message": f"q{i}"})
+        # q_final 落库后历史 21 条（20 + q_final）；预算 56：
+        # 保底 4（ok,q9,ok,q_final = 38）+ 更早 2（q8,ok = 18）
+        server.settings.context_window_tokens = 76
+        server.settings.context_output_reserve_tokens = 20
+        resp = self.client.post("/chat", json={"message": "q_final"})
+        sent = self.recording.calls[-1]
+        meta = resp.json()["context_meta"]
+        self.assertEqual(len(sent), 6)
+        self.assertEqual(
+            [m["content"] for m in sent],
+            ["ok", "q8", "ok", "q9", "ok", "q_final"],
+        )
+        self.assertTrue(meta["degraded"])
+
 
 if __name__ == "__main__":
     unittest.main()

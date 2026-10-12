@@ -6,32 +6,45 @@ from app.conversation import Conversation
 
 
 class ConversationTest(unittest.TestCase):
-    def test_messages_for_api_keeps_system_and_history(self):
+    def test_assemble_keeps_system_and_history(self):
         conv = Conversation(system_prompt="你是助手", max_messages=4)
         conv.add("user", "hi")
         conv.add("assistant", "hello")
-        messages = conv.messages_for_api()
+        messages, _ = conv.assemble(budget_tokens=10**6)
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual(len(messages), 3)
 
-    def test_truncation_keeps_system_and_recent_messages(self):
-        conv = Conversation(system_prompt="sys", max_messages=4)
+    def test_floor_is_minimum_not_ceiling(self):
+        """MAX_CONTEXT_MESSAGES 是保底：预算够时旧对话也入模（SPEC-0006）。"""
+        conv = Conversation(system_prompt="sys", max_messages=2)
         for i in range(10):
             conv.add("user", f"u{i}")
             conv.add("assistant", f"a{i}")
-        messages = conv.messages_for_api()
-        # system + 最近 4 条（u8,a8,u9,a9）
-        self.assertEqual(len(messages), 5)
+        messages, _ = conv.assemble(budget_tokens=10**6)
+        # 20 条历史全在预算内 → 一字不丢（旧语义只保留最近 2 条）
+        self.assertEqual(len(messages), 21)
         self.assertEqual(messages[0]["content"], "sys")
-        self.assertEqual(messages[1]["content"], "u8")
+        self.assertEqual(messages[1]["content"], "u0")
         self.assertEqual(messages[-1]["content"], "a9")
 
-    def test_messages_for_api_returns_copies(self):
+    def test_tight_budget_keeps_floor_and_drops_older(self):
+        conv = Conversation(system_prompt="sys", max_messages=2)
+        for i in range(10):
+            conv.add("user", f"u{i}")
+            conv.add("assistant", f"a{i}")
+        # 每条 8+ceil(len/3)；u{i}/a{i} 2 字符 = 9 token。预算 36 = sys(9) + 保底 2 + 更早 1
+        messages, meta = conv.assemble(budget_tokens=45)
+        self.assertEqual(messages[0]["content"], "sys")
+        self.assertLessEqual(len(messages), 21)
+        self.assertTrue(meta["degraded"])
+
+    def test_assemble_returns_copies(self):
         conv = Conversation(max_messages=4)
         conv.add("user", "hi")
-        messages = conv.messages_for_api()
+        messages, _ = conv.assemble(budget_tokens=10**6)
         messages[0]["content"] = "mutated"
-        self.assertEqual(conv.messages_for_api()[0]["content"], "hi")
+        again, _ = conv.assemble(budget_tokens=10**6)
+        self.assertEqual(again[0]["content"], "hi")
 
     def test_history_returns_full_snapshot_copies(self):
         conv = Conversation(max_messages=2)
@@ -39,7 +52,7 @@ class ConversationTest(unittest.TestCase):
             conv.add("user", f"u{i}")
             conv.add("assistant", f"a{i}")
         history = conv.history()
-        # 导出用完整快照，不受 messages_for_api 的截断影响
+        # 导出用完整快照，不受入模装配影响
         self.assertEqual(len(history), 10)
         self.assertEqual(history[0]["content"], "u0")
         self.assertEqual(history[-1]["content"], "a4")
@@ -57,7 +70,8 @@ class ConversationTest(unittest.TestCase):
         conv = Conversation(system_prompt="sys", max_messages=4)
         conv.add("user", "hi")
         conv.reset()
-        self.assertEqual(conv.messages_for_api(), [{"role": "system", "content": "sys"}])
+        messages, _ = conv.assemble(budget_tokens=10**6)
+        self.assertEqual(messages, [{"role": "system", "content": "sys"}])
 
     def test_invalid_role_rejected(self):
         conv = Conversation(max_messages=4)

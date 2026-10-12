@@ -65,6 +65,7 @@ from .agent import (
 )
 from .audit import TaskAuditLog, has_terminal, read_task_log, read_task_logs
 from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
+from .context_budget import assemble_messages, context_budget_from_settings
 from .context_budget import context_meta as build_context_meta
 from .conversation import Conversation
 from .export import to_json, to_markdown, traces_to_markdown
@@ -545,7 +546,9 @@ def chat(req: ChatRequest) -> ChatResponse:
         session_store.append(sid, "user", req.message)
         _name_session_from_first_message(sid, req.message)
         try:
-            messages_for_model = _conversation_for(sid).messages_for_api()
+            messages_for_model, assembled_meta = _conversation_for(sid).assemble(
+                context_budget_from_settings(settings)
+            )
             result = llm.chat(messages_for_model, req.provider, req.model)
         except ConfigError as exc:
             _record_failed_turn(sid, str(exc))
@@ -567,7 +570,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         reply=result.content,
         provider=result.provider,
         model=result.model,
-        context_meta=build_context_meta(messages_for_model, settings),
+        context_meta=assembled_meta,
     )
 
 
@@ -651,17 +654,19 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
         _name_session_from_first_message(session_id, req.message)
         conversation = _conversation_for(session_id)
         system = catalog_section(skill_registry, settings.skills_catalog_max)
-        messages: list[dict] = []
+        system_text = None
         if system:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "你在对话中按需借助技能：用户诉求匹配技能清单时，"
-                    "先调用 use_skill(名称) 激活并按指引执行；"
-                    "未列入清单的技能可用 search_skills 检索。\n\n" + system,
-                }
+            system_text = (
+                "你在对话中按需借助技能：用户诉求匹配技能清单时，"
+                "先调用 use_skill(名称) 激活并按指引执行；"
+                "未列入清单的技能可用 search_skills 检索。\n\n" + system
             )
-        messages.extend(conversation.messages_for_api())
+        messages, assembled_meta = assemble_messages(
+            system_text,
+            conversation.history(),
+            budget_tokens=context_budget_from_settings(settings),
+            recent_floor=settings.max_context_messages,
+        )
         mcp_names = [name for name in tool_registry.names() if name.startswith("mcp__")]
         base_names = [*SKILL_TOOL_NAMES, READ_TOOL_NAME, *mcp_names]
         schemas = [tool_registry.get(name).openai_schema() for name in base_names]
@@ -691,12 +696,19 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
                         reasoning="".join(reasoning_parts),
                         steps=steps,
                     )
+                    done_meta = build_context_meta(
+                        messages,
+                        settings,
+                        degraded=assembled_meta["degraded"],
+                        compressed_upto=assembled_meta["compressed_upto"],
+                        summary_generated=assembled_meta["summary_generated"],
+                    )
                     yield _sse(
                         {
                             "type": "done",
                             "provider": target.provider,
                             "model": target.model,
-                            "context_meta": build_context_meta(messages, settings),
+                            "context_meta": done_meta,
                         }
                     )
                     return

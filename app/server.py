@@ -65,6 +65,7 @@ from .agent import (
 )
 from .audit import TaskAuditLog, has_terminal, read_task_log, read_task_logs
 from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
+from .context_budget import context_meta as build_context_meta
 from .conversation import Conversation
 from .export import to_json, to_markdown, traces_to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
@@ -277,6 +278,7 @@ class ChatResponse(BaseModel):
     reply: str
     provider: str
     model: str
+    context_meta: dict = Field(default_factory=dict)
 
 
 @app.get("/health")
@@ -543,9 +545,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         session_store.append(sid, "user", req.message)
         _name_session_from_first_message(sid, req.message)
         try:
-            result = llm.chat(
-                _conversation_for(sid).messages_for_api(), req.provider, req.model
-            )
+            messages_for_model = _conversation_for(sid).messages_for_api()
+            result = llm.chat(messages_for_model, req.provider, req.model)
         except ConfigError as exc:
             _record_failed_turn(sid, str(exc))
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -563,7 +564,10 @@ def chat(req: ChatRequest) -> ChatResponse:
             model=result.model,
         )
     return ChatResponse(
-        reply=result.content, provider=result.provider, model=result.model
+        reply=result.content,
+        provider=result.provider,
+        model=result.model,
+        context_meta=build_context_meta(messages_for_model, settings),
     )
 
 
@@ -688,7 +692,12 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
                         steps=steps,
                     )
                     yield _sse(
-                        {"type": "done", "provider": target.provider, "model": target.model}
+                        {
+                            "type": "done",
+                            "provider": target.provider,
+                            "model": target.model,
+                            "context_meta": build_context_meta(messages, settings),
+                        }
                     )
                     return
                 assistant = {

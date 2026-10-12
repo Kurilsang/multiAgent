@@ -690,6 +690,15 @@ function addMeta(wrap, text) {
   wrap.appendChild(m);
 }
 
+// 上下文账目角标（SPEC-0006）：估算占用 / 预算，降级时标注
+function formatContextBadge(meta) {
+  if (!meta || !meta.budget_tokens) return '';
+  const fmt = (n) => n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+  let text = '≈' + fmt(meta.estimated_tokens) + ' / ' + fmt(meta.budget_tokens) + ' token';
+  if (meta.degraded) text += '（已降级）';
+  return text;
+}
+
 // 解析 SSE 字节流为事件对象（data: {...}\n\n）
 async function* readSse(stream) {
   const reader = stream.getReader();
@@ -1006,7 +1015,8 @@ async function send() {
         step.textContent = evt.text;
         ensureWrap().appendChild(step);
       } else if (evt.type === 'done') {
-        addMeta(ensureWrap(), evt.provider + ' / ' + evt.model);
+        const badge = formatContextBadge(evt.context_meta);
+        addMeta(ensureWrap(), evt.provider + ' / ' + evt.model + (badge ? ' · ' + badge : ''));
       } else if (evt.type === 'error') {
         ensureWrap().classList.add('error');
         ensureBubble().textContent = '出错了：' + evt.detail;

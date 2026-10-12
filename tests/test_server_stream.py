@@ -66,6 +66,8 @@ class StubSettings:
     mcp_max_tools = 64
     observation_max_chars = 4000
     max_context_messages = 20
+    context_window_tokens = 32000
+    context_output_reserve_tokens = 4096
     session_db = "data/sessions.db"
 
     def api_key_for(self, provider: str) -> str:

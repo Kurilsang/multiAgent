@@ -50,6 +50,7 @@ from .config import (
     resolve_target,
 )
 from .conversation import Conversation
+from .context_budget import context_meta as build_context_meta
 from .export import to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta
 from .skills import SkillRegistry, resolve_skills_dir
@@ -85,13 +86,15 @@ def chat_once(
     user_input: str,
     provider: str,
     model: str | None,
+    settings: Settings | None = None,
 ) -> None:
     conversation.add("user", user_input)
     console.print("[bold magenta]assistant[/bold magenta] > ", end="")
     collected: list[str] = []
     in_thought = False
+    messages_for_model = conversation.messages_for_api()
     try:
-        for event in llm.chat_events(conversation.messages_for_api(), provider, model):
+        for event in llm.chat_events(messages_for_model, provider, model):
             if isinstance(event, ReasoningDelta):
                 if not in_thought:
                     console.print()
@@ -117,6 +120,12 @@ def chat_once(
         return
     conversation.add("assistant", "".join(collected))
     console.print()
+    if settings is not None:
+        meta = build_context_meta(messages_for_model, settings)
+        console.print(
+            f"[dim]上下文：约 {meta['estimated_tokens']} token / "
+            f"预算 {meta['budget_tokens']}[/dim]"
+        )
 
 
 def run_agent_task(
@@ -335,7 +344,9 @@ def main() -> int:
             console.print(f"[green]已切换到 {escape(describe_target(target))}[/green]")
             continue
 
-        chat_once(llm, conversation, user_input, current_provider, current_model)
+        chat_once(
+            llm, conversation, user_input, current_provider, current_model, settings=settings
+        )
 
 
 if __name__ == "__main__":

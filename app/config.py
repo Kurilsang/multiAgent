@@ -69,6 +69,11 @@ class Settings(BaseSettings):
 
     max_context_messages: int = Field(default=20, ge=2)
 
+    # 上下文预算（SPEC-0006）：入模预算 = 窗口 − 输出预留。
+    # 窗口默认取三家厂商真实窗口的保守下界；输出预留给模型生成留位
+    context_window_tokens: int = Field(default=32000, ge=1)
+    context_output_reserve_tokens: int = Field(default=4096, ge=0)
+
     # Agent 任务最大思考轮数（引擎侧硬上限，超过则以 partial 终态收尾）
     agent_max_iterations: int = Field(default=8, ge=1)
 

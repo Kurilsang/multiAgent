@@ -220,7 +220,7 @@ tests/
 
 ## 配置说明
 
-见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）；`AGENT_MAX_ITERATIONS` 控制 Agent 任务的最大思考轮数（最小 1，超过则以 partial 进展摘要收尾）。
+见 [.env.example](.env.example)。只需填写实际使用的厂商 Key；`LLM_PROVIDER` 指定默认厂商；`LLM_MODEL` 仅覆盖默认厂商的模型；`MAX_CONTEXT_MESSAGES` 控制上下文保留的历史消息条数（最小 2）；`CONTEXT_WINDOW_TOKENS` / `CONTEXT_OUTPUT_RESERVE_TOKENS` 定义上下文预算（入模预算 = 窗口 − 输出预留，token 为零依赖估算口径；`/chat` 响应与 SSE `done` 帧的 `context_meta` 报出每次入模的估算占用与预算）；`AGENT_MAX_ITERATIONS` 控制 Agent 任务的最大思考轮数（最小 1，超过则以 partial 进展摘要收尾）。
 
 多 Agent 编排：`AGENT_MAX_SUBTASKS` 控制子任务总数上限（默认 6，派发闸门：跨批累计、含回炉重派）；`AGENT_MAX_PARALLEL` 控制子任务并行度（默认 3）；`AGENT_CRITIC_ENABLED` 控制 critic 收尾审查（默认开：每任务一次审查调用、最多一次整体回炉，置 0 关闭）。
 

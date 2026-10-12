@@ -277,6 +277,9 @@ def main() -> int:
         critic_enabled=settings.agent_critic_enabled,
         max_subtasks=settings.agent_max_subtasks,
         max_parallel=settings.agent_max_parallel,
+        context_window_tokens=settings.context_window_tokens,
+        context_output_reserve_tokens=settings.context_output_reserve_tokens,
+        observation_min_chars=settings.observation_min_chars,
     )
 
     console.print("[bold]multiagent 终端对话[/bold]")

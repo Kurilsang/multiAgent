@@ -78,7 +78,8 @@ def format_observation(
     if view_limit <= 0:
         return text
     if budget_limit is not None:
-        view_limit = max(min_floor, min(view_limit, budget_limit))
+        # 预算只把视图往 min_floor 收缩，绝不放大工具级/默认上限
+        view_limit = min(view_limit, max(min_floor, budget_limit))
     if len(text) <= view_limit:
         return text
     handle = pool.put(text)

@@ -20,7 +20,8 @@ from dataclasses import dataclass, replace
 from enum import Enum, auto
 
 from .llm import LLMError, ReasoningDelta, ResponseToolCalls, TextDelta
-from .observation import READ_TOOL_NAME, ResultPool, format_observation
+from .context_budget import MESSAGE_OVERHEAD_TOKENS, context_budget, estimate_messages
+from .observation import READ_TOOL_NAME, ResultPool, format_observation, observation_budget_chars
 from .skills import Skill, SkillRegistry, catalog_section
 from .tools import DEFAULT_TOOL_NAMES, SKILL_TOOL_NAMES, ToolRegistry
 
@@ -435,6 +436,9 @@ class AgentEngine:
         max_parallel: int = DEFAULT_MAX_PARALLEL,
         executor=None,
         llm_factory: Callable[[SubtaskSpec], object] | None = None,
+        context_window_tokens: int = 32000,
+        context_output_reserve_tokens: int = 4096,
+        observation_min_chars: int = 500,
     ):
         if not tools.names():
             raise ValueError("Agent 引擎至少需要一个工具，否则无法形成行动-观察回路")
@@ -457,6 +461,10 @@ class AgentEngine:
         self._max_parallel = max_parallel
         self._executor = executor
         self._llm_factory = llm_factory
+        self._context_window_tokens = context_window_tokens
+        self._context_output_reserve_tokens = context_output_reserve_tokens
+        self._budget_tokens = context_budget(context_window_tokens, context_output_reserve_tokens)
+        self._observation_min_chars = observation_min_chars
         self.observation_pool = observation_pool or ResultPool()
         # 本次运行的 agent 身份（事件标注用）；缺省 = 编排器本尊
         self._ident: dict = {}
@@ -564,6 +572,9 @@ class AgentEngine:
             observation_pool=self.observation_pool,
             persona=_CRITIC_PROTOCOL,
             allow_dispatch=False,
+            context_window_tokens=self._context_window_tokens,
+            context_output_reserve_tokens=self._context_output_reserve_tokens,
+            observation_min_chars=self._observation_min_chars,
         )
         verdict, opinion = "pass", ""
         for event in engine.run(
@@ -697,11 +708,18 @@ class AgentEngine:
                     continue
                 state = self._goto(state, AgentState.ACTING)
             elif state is AgentState.ACTING:
+                remaining_tokens = self._budget_tokens - estimate_messages(
+                    self._messages_for_api(trace, activated)
+                )
+                obs_limit = observation_budget_chars(
+                    remaining_tokens - len(parsed_calls) * (MESSAGE_OVERHEAD_TOKENS + 1),
+                    count=self._max_iterations,
+                )
                 for call in parsed_calls:
                     yield self._tag(
                         ActionStarted(tool_name=call.name, arguments=call.arguments)
                     )
-                    result, is_error = self._execute(call)
+                    result, is_error = self._execute(call, budget_limit=obs_limit)
                     yield self._tag(
                         ActionObserved(
                             tool_name=call.name, result=result, is_error=is_error
@@ -906,6 +924,9 @@ class AgentEngine:
             observation_pool=self.observation_pool,
             persona=spec.persona,
             allow_dispatch=False,
+            context_window_tokens=self._context_window_tokens,
+            context_output_reserve_tokens=self._context_output_reserve_tokens,
+            observation_min_chars=self._observation_min_chars,
         )
         return engine, tuple(granted), tuple(skills)
 
@@ -938,11 +959,12 @@ class AgentEngine:
         """给本引擎产出的事件标注 agent 身份（子 agent 事件由各自引擎标注）。"""
         return replace(event, **self._ident)
 
-    def _execute(self, call: _ParsedCall) -> tuple[str, bool]:
+    def _execute(self, call: _ParsedCall, budget_limit: int | None = None) -> tuple[str, bool]:
         """执行一次工具调用；失败转为错误观察值回灌，模型可自愈。
 
         观察值默认按视图大小截断（全文旁存句柄池，read_tool_result 续读）；
         full_result 工具（如 use_skill 的技能正文）是刻意加载的上下文，完整回灌。
+        预算降级（SPEC-0006）：budget_limit 给出时视图进一步收缩到预算额度。
         """
         try:
             tool = self._tools.get(call.name)
@@ -957,6 +979,8 @@ class AgentEngine:
                     limit=tool.max_observation_chars,
                     pool=self.observation_pool,
                     default_limit=self._max_observation_chars,
+                    budget_limit=budget_limit,
+                    min_floor=self._observation_min_chars,
                 ),
                 True,
             )
@@ -968,6 +992,8 @@ class AgentEngine:
                 limit=tool.max_observation_chars,
                 pool=self.observation_pool,
                 default_limit=self._max_observation_chars,
+                budget_limit=budget_limit,
+                min_floor=self._observation_min_chars,
             ),
             False,
         )

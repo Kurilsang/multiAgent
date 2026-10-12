@@ -224,6 +224,9 @@ def _build_wiring(
         critic_enabled=settings.agent_critic_enabled,
         max_subtasks=settings.agent_max_subtasks,
         max_parallel=settings.agent_max_parallel,
+        context_window_tokens=settings.context_window_tokens,
+        context_output_reserve_tokens=settings.context_output_reserve_tokens,
+        observation_min_chars=settings.observation_min_chars,
     )
     return tools, skills, errors, engine, mcp
 

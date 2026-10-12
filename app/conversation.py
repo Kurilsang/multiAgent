@@ -8,7 +8,9 @@ class Conversation:
 
     入模策略（SPEC-0006）：按预算分层装配——system → 记忆块 →
     最近 max_messages 条保底 → 更早对话（预算有剩余才逐字入模）。
-    max_messages 是**保底下限**而非截断上限。
+    max_messages 是**保底下限**而非截断上限。装填逻辑统一在
+    app/context_budget.py（assemble_messages/assemble_with_summary），
+    本类的 assemble 是 CLI 侧的薄封装。
     """
 
     def __init__(self, system_prompt: str | None = None, max_messages: int = 20):

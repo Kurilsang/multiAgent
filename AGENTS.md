@@ -26,7 +26,7 @@ Python 3.12；openai SDK（统一三家厂商）、pydantic-settings（.env 配�
 
 - `app/config.py` — 厂商注册表 + 目标解析；`LLM_MODEL` 只对默认厂商生效；`<厂商>_BASE_URL` 可覆盖端点（GLM Coding Plan 必须指向编码端点）
 - `app/llm.py` — OpenAI SDK 封装；非流式 = 聚合流式实现；`chat_events` 产出 TextDelta/ResponseToolCalls；120s 超时；错误转译成面向用户的中文
-- `app/conversation.py` — 主对话上下文；入模走 `app/context_budget.py` 预算分层装配（`assemble` 是唯一入模实现点），`from_history` 由持久化历史重建
+- `app/conversation.py` — 主对话上下文；入模统一走 `app/context_budget.py` 预算分层装配（`Conversation.assemble` 是 CLI 侧薄封装，server 会话通道走 `assemble_with_summary`），`from_history` 由持久化历史重建
 - `app/context_budget.py` — 上下文预算与装配（SPEC-0006）：零依赖 token 估算纯函数、`assemble_messages` 预算分层装填（system → 记忆块 → 最近 N 条保底 → 更早对话）、`assemble_with_summary` 滚动摘要吸收（覆盖水位单调、失败降级硬截断）、`context_meta` 账目；`MAX_CONTEXT_MESSAGES` 是「最近保底」而非截断上限
 - `app/sessions.py` — 会话持久化（SPEC-0005）：`data/sessions.db`（WAL + `PRAGMA user_version` 版本化迁移 + 多进程心跳检测 fail loud）；消息含思考链/工具步骤/厂商归属/失败状态
 - `app/tasks.py` — 任务运行器（SPEC-0005）：任务后台执行、事件带单调 `seq` 进缓冲并广播给订阅者；断连 = 退订（不置取消、不持锁）；同会话并发闸门 `TaskBusy`

@@ -51,7 +51,6 @@ from .config import (
 )
 from .conversation import Conversation
 from .context_budget import context_budget_from_settings
-from .context_budget import context_meta as build_context_meta
 from .export import to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta
 from .skills import SkillRegistry, resolve_skills_dir
@@ -94,7 +93,7 @@ def chat_once(
     collected: list[str] = []
     in_thought = False
     budget = context_budget_from_settings(settings) if settings else 10**9
-    messages_for_model, _ = conversation.assemble(budget)
+    messages_for_model, meta = conversation.assemble(budget)
     try:
         for event in llm.chat_events(messages_for_model, provider, model):
             if isinstance(event, ReasoningDelta):
@@ -123,11 +122,12 @@ def chat_once(
     conversation.add("assistant", "".join(collected))
     console.print()
     if settings is not None:
-        meta = build_context_meta(messages_for_model, settings)
-        console.print(
-            f"[dim]上下文：约 {meta['estimated_tokens']} token / "
-            f"预算 {meta['budget_tokens']}[/dim]"
-        )
+        line = f"[dim]上下文：约 {meta['estimated_tokens']} token / 预算 {meta['budget_tokens']}"
+        if meta.get("compressed_upto"):
+            line += f" · 已压缩至 #{meta['compressed_upto']}"
+        if meta.get("degraded"):
+            line += "（已降级）"
+        console.print(line + "[/dim]")
 
 
 def run_agent_task(

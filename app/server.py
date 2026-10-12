@@ -68,7 +68,6 @@ from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_targ
 from .context_budget import assemble_messages, assemble_with_summary, context_budget_from_settings
 from .context_budget import context_meta as build_context_meta
 from .context_budget import estimate_messages, MESSAGE_OVERHEAD_TOKENS
-from .conversation import Conversation
 from .export import to_json, to_markdown, traces_to_markdown
 from .llm import LLMClient, LLMError, ReasoningDelta, ResponseToolCalls
 from .mcp import (
@@ -345,15 +344,6 @@ def _name_session_from_first_message(session_id: str, text: str) -> None:
     name = session_name_from(text)
     if name:
         session_store.rename_session(session_id, name)
-
-
-def _conversation_for(session_id: str) -> Conversation:
-    """按会话库里的历史重建模型上下文（展示全量、入模截断）。"""
-    history = session_store.messages(session_id)
-    return Conversation.from_history(
-        [{"role": m["role"], "content": m["content"]} for m in history],
-        max_messages=settings.max_context_messages,
-    )
 
 
 def _summarize_turn(old_summary, absorbed, provider=None, model=None):
@@ -707,7 +697,6 @@ def _chat_frames(req: ChatRequest, target, session_id: str) -> Iterator[str]:
     with _session_lock(session_id):
         session_store.append(session_id, "user", req.message)
         _name_session_from_first_message(session_id, req.message)
-        conversation = _conversation_for(session_id)
         system = catalog_section(skill_registry, settings.skills_catalog_max)
         system_text = None
         if system:

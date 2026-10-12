@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.config import Settings
+from app.config import ConfigError, Settings
 from app.context_budget import context_budget_from_settings
 
 
@@ -27,7 +27,7 @@ class ContextBudgetSettingsTest(unittest.TestCase):
             context_window_tokens=1000,
             context_output_reserve_tokens=1000,
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ConfigError):
             context_budget_from_settings(settings)
 
 

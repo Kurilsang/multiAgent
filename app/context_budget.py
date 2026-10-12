@@ -5,6 +5,12 @@
 是一致且保守——宁可少装不可爆窗。
 """
 
+import logging
+
+from .config import ConfigError
+
+logger = logging.getLogger(__name__)
+
 
 def estimate_tokens(text: str) -> int:
     """估算单段文本的 token 占用（向上取整，偏保守）。"""
@@ -25,7 +31,6 @@ def _is_cjk(ch: str) -> bool:
         0x2E80 <= code <= 0x9FFF  # CJK 部首/表意文字（含扩展 A）
         or 0x3000 <= code <= 0x303F  # CJK 标点
         or 0x3040 <= code <= 0x30FF  # 假名
-        or 0x3400 <= code <= 0x4DBF  # 扩展 A（并入上方区间，冗余保留语义）
         or 0xAC00 <= code <= 0xD7AF  # 谚文
         or 0xF900 <= code <= 0xFAFF  # 兼容表意文字
         or 0xFF00 <= code <= 0xFFEF  # 全角字符
@@ -37,11 +42,19 @@ MESSAGE_OVERHEAD_TOKENS = 8
 
 
 def estimate_messages(messages: list[dict]) -> int:
-    """估算消息数组的 token 占用：逐条内容估算 + 每条固定结构开销。"""
+    """估算消息数组的 token 占用：逐条内容估算 + 每条固定结构开销。
+
+    assistant 消息的 tool_calls 参数（函数名 + JSON 参数）也计入——
+    它们是真实发给模型的 token，漏算会低估占用、破坏「保守」不变量。
+    """
     total = 0
     for message in messages:
         content = message.get("content") or ""
         total += MESSAGE_OVERHEAD_TOKENS + estimate_tokens(content)
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            total += estimate_tokens(str(fn.get("name") or ""))
+            total += estimate_tokens(str(fn.get("arguments") or ""))
     return total
 
 
@@ -51,11 +64,11 @@ def context_budget(window_tokens: int, output_reserve_tokens: int) -> int:
 
 
 def context_budget_from_settings(settings) -> int:
-    """从 Settings 计算入模预算；预留不小于窗口即配置非法。"""
+    """从 Settings 计算入模预算；预留不小于窗口即配置非法（fail loud）。"""
     window = settings.context_window_tokens
     reserve = settings.context_output_reserve_tokens
     if reserve >= window:
-        raise ValueError(
+        raise ConfigError(
             f"CONTEXT_OUTPUT_RESERVE_TOKENS({reserve}) 必须小于 "
             f"CONTEXT_WINDOW_TOKENS({window})"
         )
@@ -106,31 +119,17 @@ def assemble_messages(
     for block in memory_blocks or []:
         head.append({"role": "system", "content": block})
 
-    if recent_floor < 1:
-        recent_floor = 1
-    tail: list[dict] = list(history[-recent_floor:]) if history else []
-    older = list(history[: len(history) - len(tail)])
-
-    # 保底装不下：从最旧开始逐条舍弃，最终保 system + 最新一条
-    while len(tail) > 1 and estimate_messages(head + tail) > budget_tokens:
-        tail.pop(0)
-    if not tail and history:
-        tail = [dict(history[-1])]
-
-    # 更早对话：预算有剩余才进，与保底连续（从最靠近保底的开始）
-    while older:
-        candidate = [dict(older[-1])] + tail
-        if estimate_messages(head + candidate) > budget_tokens:
-            break
-        tail = candidate
-        older.pop()
-
+    kept, dropped, floor_truncated = _fill_budget(
+        head, history, budget_tokens, recent_floor
+    )
     # degraded = 有历史没逐字入模（T3 前无摘要兜底）或预算被击穿
-    degraded = len(tail) < len(history) or bool(
-        history and estimate_messages(head + tail) > budget_tokens
+    degraded = (
+        bool(dropped)
+        or floor_truncated
+        or bool(history and estimate_messages(head + kept) > budget_tokens)
     )
 
-    messages = head + [dict(m) for m in tail]
+    messages = head + [dict(m) for m in kept]
     meta = {
         "estimated_tokens": estimate_messages(messages),
         "budget_tokens": budget_tokens,
@@ -203,8 +202,15 @@ def assemble_with_summary(
         new_covered = dropped[-1]["seq"]
         try:
             new_summary = summarize(summary_text, dropped)
-        except Exception:  # 摘要失败 → 降级硬截断，对话不阻塞
+        except Exception as exc:  # 摘要失败 → 降级硬截断，对话不阻塞
+            logger.warning("滚动摘要生成失败，降级硬截断：%s", exc)
             break
+        logger.info(
+            "滚动摘要吸收 %d 条（覆盖水位 %d → %d）",
+            len(dropped),
+            covered_seq,
+            new_covered,
+        )
         summary_text = new_summary
         covered_seq = new_covered
         summary_generated = True

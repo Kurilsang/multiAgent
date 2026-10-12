@@ -460,6 +460,8 @@ class AgentEngine:
         self.observation_pool = observation_pool or ResultPool()
         # 本次运行的 agent 身份（事件标注用）；缺省 = 编排器本尊
         self._ident: dict = {}
+        # 子 agent 编号计数器：跨批单调递增，保证同一次运行内标识唯一且稳定
+        self._subtask_seq = 0
         # finish / dispatch_task 是协议工具：随请求注入 schema，不属于注册表
         protocol = [_FINISH_SCHEMA]
         if allow_dispatch:
@@ -492,6 +494,9 @@ class AgentEngine:
             "role": role,
             "parent_id": parent_id,
         }
+        # 子 agent 编号在本次运行内单调递增（含回炉重派的第二批），
+        # 跨任务重新计数即可——轨迹树是按任务渲染的
+        self._subtask_seq = 0
         budget = _SubtaskBudget(self._max_subtasks)
         if role == "orchestrator" and self._critic_enabled:
             return self._run_with_critic(task, provider, model, activated, cancel, budget)
@@ -786,9 +791,13 @@ class AgentEngine:
         results: queue.Queue = queue.Queue()
         jobs: list[_WorkerJob] = []
         for index, spec in enumerate(specs, 1):
+            # 子 agent 标识跨进程稳定：用运行内单调计数，不用 id(self)
+            # （对象 id 跨进程不可读；且同一次运行的多批派发会撞同一 id，
+            #  导致 UI 轨迹树把第二批子 agent 并进第一批的分区）
+            self._subtask_seq += 1
             identity = {
-                "agent_id": f"sub-{index}-{id(self)}",
-                "agent_name": f"子任务{index}",
+                "agent_id": f"sub-{self._subtask_seq}",
+                "agent_name": f"子任务{self._subtask_seq}",
                 "role": "worker",
                 "parent_id": self._ident["agent_id"],
             }

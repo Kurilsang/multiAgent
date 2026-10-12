@@ -13,10 +13,24 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app.server as server
+from app.agent import (
+    ActionObserved,
+    ActionStarted,
+    TaskFinished,
+    TaskStarted,
+    ThoughtDelta,
+)
 from app.llm import LLMError, ReasoningDelta, TextDelta
+from app.tasks import TaskHub
 
 from tests.fakes import SessionStoreMixin, text_round
-from tests.test_server_stream import FakeErrorLLM, FakeStreamLLM, StubSettings
+from tests.test_server_stream import (
+    FakeAgentEngine,
+    FakeErrorLLM,
+    FakeStreamLLM,
+    StubSettings,
+)
+from tests.test_tasks import _GatedEngine as GatedEngine
 
 
 class SessionApiTest(SessionStoreMixin, unittest.TestCase):
@@ -273,6 +287,350 @@ class SessionApiTest(SessionStoreMixin, unittest.TestCase):
         self.assertIn("消息数：0", text)
         text = self.client.get("/export?session_id=default").text
         self.assertIn("消息数：2", text)
+
+
+class TaskReplayApiTest(SessionStoreMixin, unittest.TestCase):
+    """#58 任务归属与轨迹回放：刷新后按会话读回轨迹，中断如实标注。"""
+
+    def setUp(self):
+        self._orig_settings = server.settings
+        self._orig_engine = server.agent_engine
+        self._orig_audit_dir = server.audit_log_dir
+        self._orig_hub = server.task_hub
+        self._audit_tmp = tempfile.TemporaryDirectory()
+        server.audit_log_dir = Path(self._audit_tmp.name)
+        server.settings = StubSettings()
+        server.task_hub = TaskHub()
+        self.setup_session_store()
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        for record in server.task_hub.running_tasks():
+            record.cancel.cancel()
+        server.task_hub = self._orig_hub
+        server.settings = self._orig_settings
+        server.agent_engine = self._orig_engine
+        server.audit_log_dir = self._orig_audit_dir
+        self._audit_tmp.cleanup()
+        self.teardown_session_store()
+
+    def test_completed_task_replays_with_events(self):
+        server.agent_engine = FakeAgentEngine(
+            [
+                TaskStarted(task="干个活"),
+                ThoughtDelta(text="想一下"),
+                ActionStarted(tool_name="echo", arguments={}),
+                ActionObserved(tool_name="echo", result="ok", is_error=False),
+                TaskFinished(status="completed", answer="做完了", iterations=2),
+            ]
+        )
+        self.client.post("/agent/stream", json={"task": "干个活"})
+        payload = self.client.get("/sessions/default/tasks").json()
+        self.assertEqual(len(payload["tasks"]), 1)
+        entry = payload["tasks"][0]
+        self.assertEqual(entry["task"], "干个活")
+        self.assertEqual(entry["status"], "completed")
+        self.assertFalse(entry["interrupted"])
+        # 回放给的是服务端编码好的帧（前端直接重放，不再复刻编码逻辑）
+        kinds = [f["type"] for f in entry["frames"]]
+        self.assertEqual(
+            kinds, ["task_started", "thought_delta", "action", "observation", "final"]
+        )
+        self.assertEqual([f["seq"] for f in entry["frames"]], [1, 2, 3, 4, 5])
+
+    def test_interrupted_task_is_marked_not_faked(self):
+        """索引说在跑、登记处没有它、日志无终态 = 已中断（进程重启）。"""
+        session_store = server.session_store
+        session_store.record_task(
+            "deadbeef", "default", "半截任务", status="running", log_path=str(
+                Path(server.audit_log_dir) / "20261010T120000-deadbeef.jsonl"
+            )
+        )
+        # 造一份没有终态事件的日志（进程被杀的样子）
+        log = Path(server.audit_log_dir) / "20261010T120000-deadbeef.jsonl"
+        log.write_text(
+            json.dumps(
+                {
+                    "type": "TaskAuditHeader",
+                    "ts": "2026-10-10T12:00:00",
+                    "task_id": "deadbeef",
+                    "task": "半截任务",
+                    "session_id": "default",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            + json.dumps(
+                {"type": "TaskStarted", "task": "半截任务", "agent_id": "main",
+                 "agent_name": "编排器", "role": "orchestrator", "parent_id": None},
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = self.client.get("/sessions/default/tasks").json()
+        entry = payload["tasks"][0]
+        self.assertEqual(entry["status"], "interrupted")
+        self.assertTrue(entry["interrupted"])
+        # 已有进展照常展示，不假装无事发生
+        self.assertIn("task_started", [f["type"] for f in entry["frames"]])
+
+    def test_orphan_log_without_session_not_in_any_timeline(self):
+        """无会话归属的旧日志不进任何会话时间线。"""
+        from app.audit import TaskAuditLog as Log
+
+        orphan = Log("孤儿任务", directory=server.audit_log_dir)  # 不传 session_id
+        orphan.record(TaskStarted(task="孤儿任务"))
+        orphan.record(TaskFinished(status="completed", answer="x", iterations=1))
+        payload = self.client.get("/sessions/default/tasks").json()
+        self.assertEqual(payload["tasks"], [])
+
+    def test_tasks_endpoint_404_for_unknown_session(self):
+        self.assertEqual(self.client.get("/sessions/nope/tasks").status_code, 404)
+
+    def test_running_task_is_marked_live(self):
+        # 复用 test_tasks 的门控引擎（同一种「卡住的长任务」替身）
+        gate = threading.Event()
+        server.agent_engine = GatedEngine(gate)
+        try:
+            with self.client.stream("POST", "/agent/stream", json={"task": "长任务"}):
+                pass  # TestClient 整流缓冲，出来时任务已结束
+        finally:
+            gate.set()
+        payload = self.client.get("/sessions/default/tasks").json()
+        self.assertEqual(len(payload["tasks"]), 1)
+        # 已结束：live 为 False，状态是终态而非 interrupted
+        self.assertFalse(payload["tasks"][0]["live"])
+        self.assertEqual(payload["tasks"][0]["status"], "completed")
+
+    # ---- #59 重启后的轨迹接续 ----
+
+    def _write_dead_task_log(self, task_id: str, with_terminal: bool) -> Path:
+        log = Path(server.audit_log_dir) / f"20261010T120000-{task_id}.jsonl"
+        lines = [
+            {
+                "type": "TaskAuditHeader",
+                "ts": "2026-10-10T12:00:00",
+                "task_id": task_id,
+                "task": "半截任务",
+                "session_id": "default",
+            },
+            {
+                "type": "TaskStarted",
+                "task": "半截任务",
+                "agent_id": "main",
+                "agent_name": "编排器",
+                "role": "orchestrator",
+                "parent_id": None,
+            },
+            {
+                "type": "ThoughtDelta",
+                "text": "想一下",
+                "agent_id": "main",
+                "agent_name": "编排器",
+                "role": "orchestrator",
+                "parent_id": None,
+            },
+        ]
+        if with_terminal:
+            lines.append(
+                {
+                    "type": "TaskFinished",
+                    "status": "completed",
+                    "answer": "其实跑完了",
+                    "iterations": 1,
+                    "agent_id": "main",
+                    "agent_name": "编排器",
+                    "role": "orchestrator",
+                    "parent_id": None,
+                }
+            )
+        log.write_text(
+            "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n",
+            encoding="utf-8",
+        )
+        return log
+
+    def test_restart_reattach_replays_from_audit_log(self):
+        """进程重启后按 task_id 请求：从审计日志补历史并标注已中断。"""
+        log = self._write_dead_task_log("deadbeef", with_terminal=False)
+        server.session_store.record_task(
+            "deadbeef", "default", "半截任务", status="running", log_path=str(log)
+        )
+        resp = self.client.get("/agent/tasks/deadbeef/stream?from_seq=0")
+        self.assertEqual(resp.status_code, 200)
+        frames = [
+            json.loads(line[len("data: "):])
+            for line in resp.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        self.assertTrue(frames[0]["replayed"])
+        kinds = [f["type"] for f in frames]
+        self.assertIn("task_started", kinds)
+        self.assertIn("thought_delta", kinds)
+        # 明确标注中断，而不是假装任务正常结束
+        self.assertEqual(kinds[-1], "failed")
+        self.assertIn("已中断", frames[-1]["reason"])
+
+    def test_restart_reattach_respects_from_seq(self):
+        log = self._write_dead_task_log("deadbeef", with_terminal=True)
+        server.session_store.record_task(
+            "deadbeef", "default", "半截任务", status="running", log_path=str(log)
+        )
+        resp = self.client.get("/agent/tasks/deadbeef/stream?from_seq=2")
+        frames = [
+            json.loads(line[len("data: "):])
+            for line in resp.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        events = [f for f in frames if f.get("type") != "task_meta"]
+        # 只补 seq > 2 的部分
+        self.assertTrue(all(f["seq"] > 2 for f in events))
+
+    def test_restart_task_status_reports_interrupted(self):
+        log = self._write_dead_task_log("deadbeef", with_terminal=False)
+        server.session_store.record_task(
+            "deadbeef", "default", "半截任务", status="running", log_path=str(log)
+        )
+        payload = self.client.get("/agent/tasks/deadbeef").json()
+        self.assertEqual(payload["status"], "interrupted")
+        self.assertTrue(payload["finished"])
+        self.assertTrue(payload["replayed"])
+        self.assertGreater(payload["events"], 0)
+
+    def test_restart_task_status_completed_is_not_interrupted(self):
+        log = self._write_dead_task_log("cafebabe", with_terminal=True)
+        server.session_store.record_task(
+            "cafebabe", "default", "跑完的任务", status="completed", log_path=str(log)
+        )
+        payload = self.client.get("/agent/tasks/cafebabe").json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertFalse(payload["replayed"] and payload["status"] == "interrupted")
+
+    def test_unknown_task_still_404(self):
+        self.assertEqual(self.client.get("/agent/tasks/nope").status_code, 404)
+        self.assertEqual(
+            self.client.get("/agent/tasks/nope/stream").status_code, 404
+        )
+
+    def test_session_list_exposes_interrupted_flag(self):
+        """侧栏状态点：索引里留着 running 而登记处没有 = 已中断。"""
+        log = self._write_dead_task_log("deadbeef", with_terminal=False)
+        server.session_store.record_task(
+            "deadbeef", "default", "半截任务", status="running", log_path=str(log)
+        )
+        payload = self.client.get("/sessions").json()
+        entry = next(s for s in payload["sessions"] if s["id"] == "default")
+        self.assertTrue(entry["interrupted"])
+        self.assertIsNone(entry["running_task_id"])
+
+    def test_replay_preserves_subagent_identity_and_rework(self):
+        """回放要能重建子 agent 分区与回炉标记：事件顺序与身份字段必须完整。
+
+        前端用同一套时间线渲染器消费这些帧——根 agent 的第二次
+        task_started 即回炉标记，子 agent 帧带 agent_id/parent_id 才分得开。
+        """
+        server.agent_engine = FakeAgentEngine(
+            [
+                TaskStarted(task="主任务"),
+                ActionStarted(tool_name="dispatch_task", arguments={"subtasks": []}),
+                TaskStarted(
+                    task="子任务",
+                    agent_id="sub-1",
+                    agent_name="子任务1",
+                    role="worker",
+                    parent_id="main",
+                ),
+                ThoughtDelta(
+                    text="子思考",
+                    agent_id="sub-1",
+                    agent_name="子任务1",
+                    role="worker",
+                    parent_id="main",
+                ),
+                TaskFinished(
+                    status="completed",
+                    answer="子结果",
+                    iterations=1,
+                    agent_id="sub-1",
+                    agent_name="子任务1",
+                    role="worker",
+                    parent_id="main",
+                ),
+                # 回炉：根 agent 再次 task_started
+                TaskStarted(task="主任务（含审查意见）"),
+                TaskFinished(status="completed", answer="总答案", iterations=2),
+            ]
+        )
+        self.client.post("/agent/stream", json={"task": "主任务"})
+        entry = self.client.get("/sessions/default/tasks").json()["tasks"][0]
+        frames = entry["frames"]
+        # 两个根 task_started = 回炉标记的判据
+        roots = [
+            f for f in frames
+            if f["type"] == "task_started" and "agent_id" not in f
+        ]
+        self.assertEqual(len(roots), 2)
+        # 子 agent 身份完整（分区靠它）
+        worker = [f for f in frames if f.get("agent_id") == "sub-1"]
+        self.assertTrue(worker)
+        self.assertTrue(all(f.get("parent_id") == "main" for f in worker))
+        self.assertTrue(all(f.get("role") == "worker" for f in worker))
+        self.assertIn("final", [f["type"] for f in frames])
+
+    def test_replay_frames_carry_identity_via_frame_encoder(self):
+        """帧编码器要同时吃得下引擎事件与审计 dict（回放不另写一套渲染）。"""
+        from app.agent import ActionObserved as Obs
+        from app.server import _agent_event_frame
+
+        live = _agent_event_frame(
+            Obs(
+                tool_name="echo",
+                result="ok",
+                is_error=False,
+                agent_id="sub-1",
+                agent_name="子任务1",
+                role="worker",
+                parent_id="main",
+            )
+        )
+        replayed = _agent_event_frame(
+            {
+                "type": "ActionObserved",
+                "tool_name": "echo",
+                "result": "ok",
+                "is_error": False,
+                "agent_id": "sub-1",
+                "agent_name": "子任务1",
+                "role": "worker",
+                "parent_id": "main",
+            }
+        )
+        self.assertEqual(live, replayed)
+        self.assertEqual(live["agent_id"], "sub-1")
+        self.assertEqual(live["parent_id"], "main")
+
+    def test_failed_handle_note_survives_replay(self):
+        """旁存句柄失效的说明随事件落盘，回放时如实呈现（不伪造）。"""
+        note = (
+            "观察值句柄已失效或不存在：'r1'"
+            "（可能已被内存池淘汰或服务重启清空）"
+        )
+        server.agent_engine = FakeAgentEngine(
+            [
+                TaskStarted(task="读大结果"),
+                ActionStarted(tool_name="read_tool_result", arguments={"handle": "r1"}),
+                ActionObserved(
+                    tool_name="read_tool_result", result=note, is_error=True
+                ),
+                TaskFinished(status="partial", answer="只拿到部分", iterations=2),
+            ]
+        )
+        self.client.post("/agent/stream", json={"task": "读大结果"})
+        entry = self.client.get("/sessions/default/tasks").json()["tasks"][0]
+        observed = [f for f in entry["frames"] if f["type"] == "observation"][0]
+        self.assertTrue(observed["is_error"])
+        self.assertIn("句柄已失效", observed["text"])
 
 
 if __name__ == "__main__":

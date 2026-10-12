@@ -208,14 +208,15 @@ tests/
 ├── test_catalog_store.py   # SQLite 缓存 / 凭证仓 / 刷新器
 ├── test_catalog_pack.py    # 目录包获取（git 坐标 / ZIP + zip-slip 防护）
 ├── test_market_api.py      # 主服务 /market/* 代理与目录包安装
-├── test_sessions.py        # 会话库（落库/迁移/多进程检测/命名）
-├── test_sessions_api.py    # 会话 HTTP 面（落库时机/恢复/CRUD/归属）
+├── test_sessions.py        # 会话库（落库/迁移/多进程检测/命名/任务索引）
+├── test_sessions_api.py    # 会话 HTTP 面（落库时机/恢复/CRUD/归属/轨迹回放）
 ├── test_tasks.py           # 任务生命周期解耦（真实 uvicorn：断连不取消/重连/并发拒绝）
+├── test_webui_reconnect.py # WebUI 重连逻辑（node 跑页面里的真实实现）
 ├── test_export.py
 └── test_server_stream.py
 ```
 
-术语表见 [CONTEXT.md](CONTEXT.md)；架构决策见 [docs/adr/](docs/adr/)；设计规格见 [docs/specs/](docs/specs/)。
+术语表见 [CONTEXT.md](CONTEXT.md)；架构决策见 [docs/adr/](docs/adr/)（[ADR-0004](docs/adr/0004-task-lifecycle-decoupled-from-http.md) 记录「任务生命周期不绑定 HTTP 连接」）；设计规格见 [docs/specs/](docs/specs/)。
 
 ## 配置说明
 
@@ -253,15 +254,14 @@ python -m unittest discover tests -v
 ## 已知范围限制
 
 - 会话历史持久化在 `SESSION_DB`（默认 `data/sessions.db`，已 gitignore）：服务重启后主对话与任务轨迹都还在；**页面展示全量历史、发给模型仍按 `MAX_CONTEXT_MESSAGES` 截断**（长会话的上下文仍是短板，自动摘要未做）
-- **不做「进程重启后续跑同一任务」**：重启后一切可见、可回看、可重跑，但不续跑——那需要工具副作用幂等性与 MCP 会话/厂商流等不可恢复资源的重建语义。（「已中断」标注与「重跑」按钮属 #58 任务归属与轨迹回放，尚未落地）
+- **不做「进程重启后续跑同一任务」**：重启后一切可见、可回看、可重跑，但不续跑——那需要工具副作用幂等性与 MCP 会话/厂商流等不可恢复资源的重建语义。中断的任务在时间线上标注「⚠ 已中断（进程重启）」并保留中断前已有的进展，附「重跑」按钮（以同一任务文本发起**新任务**，不是续跑）
 - 单进程边界：检测到另一活进程占用同一会话库会拒绝启动（心跳 + pid 存活判定）；不做多进程部署与跨进程任务广播。停机时置取消并最多等 5 秒让在跑任务收尾（任务线程是守护线程，超时即随进程退出）
-- 会话列表接口（`GET /sessions`）已就位，但 WebUI 的会话侧栏（切换/重命名/删除入口）属 #57，尚未落地——当前只能靠 URL 的 `?session=<id>` 切换会话
+- 旁存句柄池不落盘：重启后轨迹里「续读某句柄」的调用无法满足，UI 与错误信息如实说明（观察值 `is_error` 事件随审计日志落盘，回放时原样呈现）
 - 多 Agent 编排为一层深度（子 agent 不能再派发）；critic 默认开启 = 每任务多一次审查调用、最多一次整体重跑（`AGENT_CRITIC_ENABLED=0` 可关）；MCP 工具不随派发默认下放，需编排器显式点名
 - MCP 接入支持 stdio 与 streamable-http（sse 协议已废弃，不做）；密钥支持静态 env/header（`${VAR}` 占位 + `.env`，推荐长期 PAT）与 `auth: oauth` 动态授权流（授权码 + PKCE 终端贴码 / 无头设备码；token 存 `MCP_TOKEN_FILE` 独立文件、过期自动刷新，刷新失败降级为连接错误提示重新授权；OAuth 首次授权在装配期终端交互完成，无浏览器自助重定向服务）；mcpb 单文件包条目暂不支持安装（后续扩展点）；官方 MCP Registry 处于 preview 阶段（schema 可能变更），默认翻到游标耗尽（2000 页硬上限防失控）；stdio 不做沙箱——连接定义的命令以 argv 直起子进程（不经 shell），配置 stdio 服务 = 授权本机执行该命令（确认卡已披露命令原文）
 - 第三方技能包是提示注入面（生态已有恶意技能实测报告）：格式严格校验 + 字段白名单 + 长度上限兜底，内容不做自动审计，仅安装可信来源
 - 技能在线目录：skills.sh 官方 API 为 Vercel OIDC 专属，走页面内嵌数据降级解析（**站点改版需跟进适配器**）；LobeHub 需一次注册（限 5 次/30 分钟/IP）；目录包附带脚本/资源一律丢弃（纯提示词边界）；`services/catalog/catalog.db` 含平台凭证，已被 .gitignore 忽略
 - CLI 仍为进程内单会话，**不读写** WebUI 的会话库（两条入口的历史互不相干）
-- 旁存续读句柄池不落盘：重启后轨迹里「续读某句柄」的调用无法满足，UI/错误信息如实说明
 
 ## 后续规划
 

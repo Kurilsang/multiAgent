@@ -1,7 +1,7 @@
 # SPEC-0005：多会话持久化与断连续流（会话落库 + 任务轨迹重放 + 任务生命周期解耦）
 
 状态：已定稿（grilling 会话逐条确认 + to-spec/to-tickets 落票）· 日期：2026-10-10
-关联：[SPEC-0004](0004-multi-agent.md)（本 spec 解禁其非目标「多会话持久化与任务恢复」）、[SPEC-0003](0003-mcp-market.md)、[ADR-0001](../adr/0001-state-machine-for-react-loop.md)、[ADR-0002](../adr/0002-dual-layer-termination.md)、[ADR-0003](../adr/0003-multi-agent-orchestration.md)、CONTEXT.md「任务」「轨迹」「主对话」「审计日志」「叫停」「旁存续读」。
+关联：[SPEC-0004](0004-multi-agent.md)（本 spec 解禁其非目标「多会话持久化与任务恢复」）、[SPEC-0003](0003-mcp-market.md)、[ADR-0001](../adr/0001-state-machine-for-react-loop.md)、[ADR-0002](../adr/0002-dual-layer-termination.md)、[ADR-0003](../adr/0003-multi-agent-orchestration.md)、[**ADR-0004**](../adr/0004-task-lifecycle-decoupled-from-http.md)（任务生命周期不绑定 HTTP 连接——本 spec 对「断连即取消」的修正留档）、CONTEXT.md「任务」「轨迹」「主对话」「审计日志」「叫停」「旁存续读」「会话」「断连续流」。
 
 ## 问题（Problem Statement）
 

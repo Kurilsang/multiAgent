@@ -255,6 +255,32 @@ class SubtaskBudgetTest(unittest.TestCase):
         self.assertTrue(observations[1].is_error)
         self.assertIn("子任务数已达上限", observations[1].result)
 
+    def test_subagent_ids_unique_across_batches(self):
+        """跨批派发的子 agent 标识必须唯一（否则 UI 轨迹树会把两批并成一块）。
+
+        旧实现用 f"sub-{index}-{id(self)}"，同一次运行的第二批会与第一批
+        撞 id；编号改为运行内单调递增后不再撞。
+        """
+        engine = self.make_engine(
+            [
+                dispatch_round([{"task": "A"}], call_id="call_d1"),
+                dispatch_round([{"task": "B"}, {"task": "C"}], call_id="call_d2"),
+                tool_round("finish", {"answer": "done"}, call_id="call_f"),
+            ],
+            {"A": [text_round("a")], "B": [text_round("b")], "C": [text_round("c")]},
+            max_subtasks=6,
+        )
+        events = list(engine.run("主任务"))
+        worker_ids = [
+            e.agent_id for e in events if getattr(e, "role", "") == "worker"
+        ]
+        self.assertTrue(worker_ids)
+        # 三批子 agent 各占一个标识，没有合并
+        self.assertEqual(len(set(worker_ids)), 3)
+        # 标识不含对象 id（跨进程可读）
+        for agent_id in set(worker_ids):
+            self.assertRegex(agent_id, r"^sub-\d+$")
+
     def test_budget_shared_with_rework(self):
         """回炉重派同样计数：critic 判 revise 后的重跑不能突破上限。"""
 

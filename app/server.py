@@ -63,7 +63,7 @@ from .agent import (
     TaskStarted,
     ThoughtDelta,
 )
-from .audit import TaskAuditLog, read_task_logs
+from .audit import TaskAuditLog, has_terminal, read_task_log, read_task_logs
 from .config import PROJECT_ROOT, PROVIDERS, ConfigError, Settings, resolve_target
 from .conversation import Conversation
 from .export import to_json, to_markdown, traces_to_markdown
@@ -110,6 +110,9 @@ llm = LLMClient(settings)
 audit_log_dir: Path | None = None
 # 会话库落点（None = SESSION_DB 配置；测试注入临时库保持封闭）
 session_db_path: Path | None = None
+
+# 「已中断」的用户可见文案（一处定义，回放帧与状态查询共用）
+INTERRUPTED_NOTE = "⚠ 已中断（进程重启）：以上为中断前已有的进展"
 
 
 def _open_session_store(path: Path | None = None) -> SessionStore:
@@ -362,14 +365,19 @@ def reset() -> dict:
 
 @app.get("/sessions")
 def list_sessions() -> dict:
-    """会话列表（最近更新在前），附默认会话标识与各会话在跑任务。
+    """会话列表（最近更新在前），附默认会话标识与各会话任务状态。
 
-    running_task_id 让 WebUI 在刷新后能发现「本会话还有任务在跑」并接回
-    （SPEC-0005 T5）。
+    running_task_id / interrupted 让 WebUI 侧栏显示状态点（#57），并让刷新后
+    能发现「本会话还有任务在跑」而接回（T5）。
     """
     sessions = session_store.list_sessions()
     for entry in sessions:
-        entry["running_task_id"] = task_hub.running_task_id(entry["id"])
+        running = task_hub.running_task_id(entry["id"])
+        entry["running_task_id"] = running
+        entry["interrupted"] = any(
+            task["status"] == "running" and task["task_id"] != running
+            for task in session_store.list_tasks(entry["id"])
+        )
     return {
         "sessions": sessions,
         "default_session_id": session_store.ensure_default_session(),
@@ -394,6 +402,66 @@ def session_messages(session_id: str) -> dict:
     if session is None:
         raise HTTPException(status_code=404, detail=f"未找到会话: {session_id}")
     return {"session": session, "messages": session_store.messages(session_id)}
+
+
+def _task_replay_state(entry: dict, running_task_id: str | None = None) -> dict:
+    """由一个任务索引条目推出回放状态（三处共用，避免各推一遍）。
+
+    判定规则：索引说在跑、但登记处没有它（进程重启留下的孤儿）——
+    此时若审计日志也没有编排器终态，就是**已中断**；有终态则按终态记。
+    """
+    log = read_task_log(path=entry["log_path"]) if entry["log_path"] else None
+    events = log["events"] if log else []
+    status = entry["status"]
+    interrupted = False
+    if status == "running" and entry["task_id"] != running_task_id:
+        interrupted = not has_terminal(events)
+        status = "interrupted" if interrupted else "failed"
+    return {
+        "task_id": entry["task_id"],
+        "task": entry["task"],
+        "status": status,
+        "started_at": entry["started_at"],
+        "finished_at": entry["finished_at"],
+        "interrupted": interrupted,
+        "live": entry["task_id"] == running_task_id,
+        "events": events,
+    }
+
+
+@app.get("/sessions/{session_id}/tasks")
+def session_tasks(session_id: str) -> dict:
+    """会话的任务轨迹（刷新后回放用）：索引 + **已编码的帧**。
+
+    事件以审计 JSONL 为唯一权威副本，这里只是按索引读回。帧由服务端用
+    同一个编码器产出（`_agent_event_frame`）——前端直接重放进同一套时间线
+    渲染器，不再在 JS 里复刻一份编码逻辑（复刻必然漂移）。
+    没有终态事件的判定为**已中断**（进程重启），如实标注而不是假装完成。
+    无会话归属的旧日志不进任何会话时间线（只供人工排障）。
+    """
+    session = session_store.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"未找到会话: {session_id}")
+    running = task_hub.running_task_id(session_id)
+    tasks = []
+    for entry in session_store.list_tasks(session_id):
+        state = _task_replay_state(entry, running)
+        state["frames"] = [
+            {**_agent_event_frame(event), "seq": index}
+            for index, event in enumerate(state.pop("events"), 1)
+        ]
+        if state["interrupted"]:
+            # 中断标注也由服务端给出（前端只负责显示，不再各写一份文案）
+            state["frames"].append(
+                {
+                    "type": "failed",
+                    "reason": INTERRUPTED_NOTE,
+                    "iterations": 0,
+                    "seq": len(state["frames"]) + 1,
+                }
+            )
+        tasks.append(state)
+    return {"session": session, "tasks": tasks, "running_task_id": running}
 
 
 @app.post("/sessions/{session_id}/rename")
@@ -733,45 +801,69 @@ class AgentRequest(BaseModel):
         return value
 
 
+def _event_field(event, name: str, default=None):
+    """读事件字段：既支持引擎事件（dataclass），也支持审计日志事件（dict）。
+
+    回放路径把 JSONL 读回来的 dict 直接喂进同一套帧编码器，避免第二套渲染。
+    只在字段**缺失**时取默认值；显式写入的 null 按原值返回（不静默替换），
+    以免把「日志里确实没有」和「日志里写着 null」混为一谈。
+    """
+    if isinstance(event, dict):
+        return event.get(name, default)
+    return getattr(event, name, default)
+
+
 def _identity_fields(event) -> dict:
     """事件的 agent 身份字段；根 agent（编排器本尊）的帧保持向后兼容不含。"""
-    agent_id = getattr(event, "agent_id", "main")
-    role = getattr(event, "role", "orchestrator")
-    parent_id = getattr(event, "parent_id", None)
+    agent_id = _event_field(event, "agent_id", "main")
+    role = _event_field(event, "role", "orchestrator")
+    parent_id = _event_field(event, "parent_id", None)
     if agent_id == "main" and role == "orchestrator" and parent_id is None:
         return {}
     return {
         "agent_id": agent_id,
-        "agent_name": getattr(event, "agent_name", ""),
+        "agent_name": _event_field(event, "agent_name", ""),
         "role": role,
         "parent_id": parent_id,
     }
 
 
 def _agent_event_frame(event) -> dict:
-    """把引擎事件编码为 SSE 载荷（子 agent 事件附 agent 身份字段）。"""
-    if isinstance(event, TaskStarted):
+    """把引擎事件（或审计日志事件 dict）编码为 SSE 载荷。
+
+    子 agent 事件附 agent 身份字段；两类来源共用同一编码，回放不另写一套。
+    """
+    kind = event.get("type") if isinstance(event, dict) else None
+    if kind == "TaskStarted" or isinstance(event, TaskStarted):
         frame = {"type": "task_started"}
-    elif isinstance(event, ThoughtDelta):
-        frame = {"type": "thought_delta", "text": event.text}
-    elif isinstance(event, ActionStarted):
-        frame = {"type": "action", "tool": event.tool_name, "arguments": event.arguments}
-    elif isinstance(event, ActionObserved):
+    elif kind == "ThoughtDelta" or isinstance(event, ThoughtDelta):
+        frame = {"type": "thought_delta", "text": _event_field(event, "text", "")}
+    elif kind == "ActionStarted" or isinstance(event, ActionStarted):
+        frame = {
+            "type": "action",
+            "tool": _event_field(event, "tool_name", ""),
+            "arguments": _event_field(event, "arguments", {}),
+        }
+    elif kind == "ActionObserved" or isinstance(event, ActionObserved):
         frame = {
             "type": "observation",
-            "tool": event.tool_name,
-            "text": event.result,
-            "is_error": event.is_error,
+            "tool": _event_field(event, "tool_name", ""),
+            "text": _event_field(event, "result", ""),
+            "is_error": _event_field(event, "is_error", False),
         }
-    elif isinstance(event, TaskFinished):
+    elif kind == "TaskFinished" or isinstance(event, TaskFinished):
         frame = {
             "type": "final",
-            "status": event.status,
-            "answer": event.answer,
-            "iterations": event.iterations,
+            "status": _event_field(event, "status", ""),
+            "answer": _event_field(event, "answer", ""),
+            "iterations": _event_field(event, "iterations", 0),
         }
-    elif isinstance(event, TaskFailed):
-        frame = {"type": "failed", "reason": event.reason, "iterations": event.iterations}
+    elif kind == "TaskFailed" or isinstance(event, TaskFailed):
+        frame = {
+            "type": "failed",
+            "reason": _event_field(event, "reason", ""),
+            "iterations": _event_field(event, "iterations", 0),
+        }
     else:
         raise RuntimeError(f"未知的引擎事件类型: {type(event).__name__}")
     frame.update(_identity_fields(event))
@@ -809,7 +901,9 @@ def _task_terminal_writeback(record: TaskRecord) -> None:
 
     FAILED 与叫停不落答案（主对话保持一问一答的连贯性，见 CONTEXT.md）；
     答案带该任务实际的厂商/模型归属，导出与页面据此显示。
+    任务索引一并补终态，供刷新后回放轨迹。
     """
+    session_store.finish_task(record.task_id, record.status)
     if record.status in ("completed", "partial") and record.answer:
         session_store.append(record.session_id, "user", record.task)
         session_store.append(
@@ -841,7 +935,7 @@ def _start_task(
     audit = TaskAuditLog(task, directory=audit_log_dir, session_id=session_id)
     target = resolve_target(settings, provider, model)
     try:
-        return task_hub.start(
+        record = task_hub.start(
             session_id=session_id,
             task=task,
             runner=lambda cancel: agent_engine.run(
@@ -854,6 +948,11 @@ def _start_task(
         )
     except TaskBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # 任务索引：记录归属与日志落点（事件仍以 JSONL 为唯一权威副本）
+    session_store.record_task(
+        record.task_id, session_id, task, status="running", log_path=str(audit.path)
+    )
+    return record
 
 
 def _task_frames(record: TaskRecord, from_seq: int = 0) -> Iterator[str]:
@@ -943,10 +1042,31 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
 
 @app.get("/agent/tasks/{task_id}")
 def task_status(task_id: str) -> dict:
-    """任务状态查询：供 UI 决定是否重连、从哪个序号接。"""
+    """任务状态查询：供 UI 决定是否重连、从哪个序号接。
+
+    内存里没有但审计日志在（进程重启过）= 从日志补出状态并标 interrupted，
+    不谎报 404，也不假装任务还在跑。
+    """
     record = task_hub.get(task_id)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"未找到任务: {task_id}")
+        entry = session_store.get_task(task_id)
+        if entry is None or not entry["log_path"]:
+            raise HTTPException(status_code=404, detail=f"未找到任务: {task_id}")
+        log = read_task_log(path=entry["log_path"])
+        events = log["events"] if log else []
+        interrupted = not has_terminal(events)
+        return {
+            "task_id": task_id,
+            "session_id": entry["session_id"],
+            "task": entry["task"],
+            "status": "interrupted" if interrupted else entry["status"],
+            "answer": "",
+            "reason": "已中断（进程重启）" if interrupted else "",
+            "iterations": 0,
+            "events": len(events),
+            "finished": True,
+            "replayed": True,
+        }
     return {
         "task_id": record.task_id,
         "session_id": record.session_id,
@@ -962,12 +1082,62 @@ def task_status(task_id: str) -> dict:
 
 @app.get("/agent/tasks/{task_id}/stream")
 def task_reattach(task_id: str, from_seq: int = 0) -> StreamingResponse:
-    """重连续流：先补发 seq > from_seq 的历史事件，再转实时。"""
+    """重连续流：先补发 seq > from_seq 的历史事件，再转实时。
+
+    进程重启后内存缓冲已空，此时从审计日志补历史（#59）：任务已死，
+    补完即结束，并**明确标注已中断**，不假装它还活着。
+    """
     record = task_hub.get(task_id)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"未找到任务: {task_id}")
+        return _replay_dead_task(task_id, from_seq)
     return StreamingResponse(
         _task_frames(record, from_seq),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+def _replay_dead_task(task_id: str, from_seq: int) -> StreamingResponse:
+    """从审计日志补出已不在内存里的任务事件（重启后的轨迹接续）。"""
+    entry = session_store.get_task(task_id)
+    if entry is None or not entry["log_path"]:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到任务: {task_id}（进程可能已重启，且无审计日志可回放）",
+        )
+    log = read_task_log(path=entry["log_path"])
+    events = log["events"] if log else []
+    interrupted = not has_terminal(events)
+
+    def frames() -> Iterator[str]:
+        yield _sse(
+            {
+                "type": "task_meta",
+                "task_id": task_id,
+                "session_id": entry["session_id"],
+                "task": entry["task"],
+                "replayed": True,
+            }
+        )
+        for index, event in enumerate(events, 1):
+            if index <= from_seq:
+                continue
+            frame = _agent_event_frame(event)
+            frame["seq"] = index
+            frame["task_id"] = task_id
+            yield _sse(frame)
+        if interrupted:
+            yield _sse(
+                {
+                    "type": "failed",
+                    "reason": INTERRUPTED_NOTE,
+                    "iterations": 0,
+                    "task_id": task_id,
+                }
+            )
+
+    return StreamingResponse(
+        frames(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )

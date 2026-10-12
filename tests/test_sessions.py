@@ -246,6 +246,83 @@ class SessionStoreTest(unittest.TestCase):
         finally:
             store.close()
 
+    # ---- 任务索引（#58：刷新后回放轨迹的查询面） ----
+
+    def test_task_index_records_and_lists(self):
+        self.store.ensure_default_session()
+        self.store.record_task("t1", "default", "任务一", log_path="/logs/t1.jsonl")
+        self.store.record_task("t2", "default", "任务二", log_path="/logs/t2.jsonl")
+        self.store.finish_task("t1", "completed")
+        tasks = self.store.list_tasks("default")
+        self.assertEqual([t["task_id"] for t in tasks], ["t1", "t2"])
+        self.assertEqual(tasks[0]["status"], "completed")
+        self.assertTrue(tasks[0]["finished_at"])
+        self.assertEqual(tasks[1]["status"], "running")
+        self.assertEqual(tasks[1]["log_path"], "/logs/t2.jsonl")
+
+    def test_task_index_is_scoped_per_session(self):
+        self.store.create_session("A", session_id="a")
+        self.store.create_session("B", session_id="b")
+        self.store.record_task("t1", "a", "A 的任务")
+        self.store.record_task("t2", "b", "B 的任务")
+        self.assertEqual([t["task_id"] for t in self.store.list_tasks("a")], ["t1"])
+        self.assertEqual([t["task_id"] for t in self.store.list_tasks("b")], ["t2"])
+
+    def test_task_index_survives_reopen(self):
+        """索引落库：重启后仍能查到任务归属（回放的前提）。"""
+        self.store.record_task("t1", "default", "任务", log_path="/logs/t1.jsonl")
+        self.store.finish_task("t1", "partial")
+        self.store.close()
+        reopened = SessionStore(self.path)
+        try:
+            entry = reopened.get_task("t1")
+        finally:
+            reopened.close()
+        self.assertEqual(entry["status"], "partial")
+        self.assertEqual(entry["session_id"], "default")
+
+    def test_v1_database_migrates_to_v2_gaining_task_index(self):
+        """既有 v1 库（有会话与消息、无 tasks 表）能被迁移，数据不丢。"""
+        self.store.close()
+        legacy = Path(self._tmp.name) / "legacy.db"
+        conn = sqlite3.connect(str(legacy))
+        # 手工造一个 v1 形态的库：只跑 v1 迁移并盖版本号
+        conn.executescript(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',"
+            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " session_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL,"
+            " content TEXT NOT NULL, provider TEXT, model TEXT,"
+            " status TEXT NOT NULL DEFAULT 'ok', reasoning TEXT, steps TEXT,"
+            " created_at TEXT NOT NULL);"
+            "CREATE TABLE runtime (id INTEGER PRIMARY KEY CHECK (id = 1),"
+            " pid INTEGER NOT NULL, heartbeat_at TEXT NOT NULL);"
+            "PRAGMA user_version = 1;"
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, name, created_at, updated_at) VALUES"
+            " ('default', '旧会话', '2026-10-10T10:00:00', '2026-10-10T10:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, seq, role, content, created_at)"
+            " VALUES ('default', 1, 'user', '旧消息', '2026-10-10T10:00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = SessionStore(legacy)
+        try:
+            self.assertEqual(migrated.schema_version, SCHEMA_VERSION)
+            # 旧数据完好
+            self.assertEqual(
+                [m["content"] for m in migrated.messages("default")], ["旧消息"]
+            )
+            # 新表可用
+            migrated.record_task("t1", "default", "新任务")
+            self.assertEqual(len(migrated.list_tasks("default")), 1)
+        finally:
+            migrated.close()
+
 
 class SessionStorageConventionTest(unittest.TestCase):
     """会话库的落盘约定：数据目录不入库、默认路径指向 data/。"""

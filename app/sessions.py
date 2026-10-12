@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 # 会话库 schema 版本：新增迁移时 +1 并在 _MIGRATIONS 登记
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 # 默认会话标识：不带 session_id 的请求落到这里（既有调用方式不破）
 DEFAULT_SESSION_ID = "default"
 # 会话名缺省取首条用户消息的前若干字符
@@ -55,6 +55,20 @@ CREATE TABLE IF NOT EXISTS runtime (
 );
 """
 
+# v2：任务索引（只存索引，事件仍以审计 JSONL 为唯一权威副本）
+_TASKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    task TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    log_path TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id, started_at);
+"""
+
 
 class SessionStoreError(Exception):
     """会话库不可用（版本不匹配、被其他进程占用等），信息面向用户。"""
@@ -65,8 +79,13 @@ def _migrate_to_1(conn) -> None:
     conn.executescript(_HEADER_SCHEMA)
 
 
+def _migrate_to_2(conn) -> None:
+    """v2：任务索引表（刷新后按会话回放轨迹的查询面）。"""
+    conn.executescript(_TASKS_SCHEMA)
+
+
 # 版本 → 迁移函数（模块级：存进字典后不会被绑定成方法）
-_MIGRATIONS = {1: _migrate_to_1}
+_MIGRATIONS = {1: _migrate_to_1, 2: _migrate_to_2}
 
 
 def session_name_from(text: str) -> str:
@@ -376,13 +395,55 @@ class SessionStore:
             out.append(item)
         return out
 
-    def message_count(self, session_id: str) -> int:
+    # ---- 任务索引（事件仍以审计 JSONL 为唯一权威副本） ----
+
+    def record_task(
+        self,
+        task_id: str,
+        session_id: str,
+        task: str,
+        status: str = "running",
+        log_path: str = "",
+    ) -> None:
+        """登记一次任务（启动时调用；终态由 finish_task 补）。"""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO tasks (task_id, session_id, task, status, started_at,"
+                " log_path) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET session_id = excluded.session_id,"
+                " task = excluded.task, status = excluded.status,"
+                " log_path = excluded.log_path",
+                (task_id, session_id, task, status, self._stamp(), log_path),
+            )
+            self._conn.commit()
+
+    def finish_task(self, task_id: str, status: str) -> None:
+        """记录任务终态（含 failed / partial；中断的任务留在 running 由 UI 判定）。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE tasks SET status = ?, finished_at = ? WHERE task_id = ?",
+                (status, self._stamp(), task_id),
+            )
+            self._conn.commit()
+
+    def list_tasks(self, session_id: str) -> list[dict]:
+        """某会话的任务索引（时间序）：刷新后据此回放轨迹。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT task_id, session_id, task, status, started_at, finished_at,"
+                " log_path FROM tasks WHERE session_id = ? ORDER BY started_at, rowid",
+                (session_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_task(self, task_id: str) -> dict | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
-                (session_id,),
+                "SELECT task_id, session_id, task, status, started_at, finished_at,"
+                " log_path FROM tasks WHERE task_id = ?",
+                (task_id,),
             ).fetchone()
-        return int(row["n"])
+        return dict(row) if row is not None else None
 
     def close(self) -> None:
         self._heartbeat_stop.set()
